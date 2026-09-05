@@ -1,10 +1,11 @@
 from datetime import datetime
 
-from flask import Flask, render_template, redirect, url_for, Response, abort
+from flask import Flask, render_template, redirect, url_for, Response, abort, request
 
 from db import get_db, init_db
 from calendar_service import generate_ics
 from proposal_resolver import accept_proposal, dismiss_proposal, StaleProposalError
+from source_health import classify_source_health
 
 app = Flask(__name__)
 
@@ -13,6 +14,8 @@ ACTION_TO_STATUS = {
     "watching": "watching",
     "ignore": "ignored",
 }
+
+INACTIVE_REASONS = {"canceled", "removed", "source_missing", "finished", "manual"}
 
 FIELD_LABELS = {
     "start_date": "Start date",
@@ -37,6 +40,11 @@ def format_proposal_value(value):
         return "Not set"
     text = str(value).replace("_", " ")
     return text if "://" in text else text[:1].upper() + text[1:]
+
+
+@app.template_filter("source_health")
+def source_health_filter(e):
+    return classify_source_health(e)
 
 
 def _fmt_date(d):
@@ -72,7 +80,8 @@ def format_event_date(e):
 
 def _load_dashboard_events(conn):
     return conn.execute(
-        "SELECT * FROM events ORDER BY status = 'ignored', start_date IS NULL, start_date, name"
+        "SELECT * FROM events "
+        "ORDER BY event_state = 'inactive', status = 'ignored', start_date IS NULL, start_date, name"
     ).fetchall()
 
 
@@ -110,6 +119,35 @@ def set_status(event_id, action):
     conn.execute(
         "UPDATE events SET status = ?, updated_at = datetime('now') WHERE id = ?",
         (ACTION_TO_STATUS[action], event_id),
+    )
+    conn.commit()
+    conn.close()
+    return redirect(url_for("index"))
+
+
+@app.route("/event/<int:event_id>/inactive", methods=["POST"])
+def mark_inactive_route(event_id):
+    reason = request.form.get("inactive_reason", "manual")
+    if reason not in INACTIVE_REASONS:
+        reason = "manual"
+    conn = get_db()
+    conn.execute(
+        "UPDATE events SET event_state = 'inactive', inactive_reason = ?, "
+        "updated_at = datetime('now') WHERE id = ?",
+        (reason, event_id),
+    )
+    conn.commit()
+    conn.close()
+    return redirect(url_for("index"))
+
+
+@app.route("/event/<int:event_id>/reactivate", methods=["POST"])
+def reactivate_route(event_id):
+    conn = get_db()
+    conn.execute(
+        "UPDATE events SET event_state = 'active', inactive_reason = NULL, "
+        "updated_at = datetime('now') WHERE id = ?",
+        (event_id,),
     )
     conn.commit()
     conn.close()

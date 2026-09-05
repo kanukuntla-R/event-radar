@@ -374,6 +374,27 @@ class ExceptionIsolationTests(unittest.TestCase):
         self.assertEqual(_pending_proposals(self.conn, broken_id), [])
 
 
+class NoAutoInactivationTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = _make_conn()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_repeated_source_failures_never_auto_inactivate(self):
+        event_id = _insert_event(self.conn, name="Flaky Hack", registration_status="unknown")
+        collector = _CountingCollector(default_result=_collector_result("unavailable"))
+
+        for day_offset, day in enumerate((5, 12, 19, 26)):
+            today = date(2026, 9, day)
+            run_due_hackathon_checks(self.conn, today=today, now=NOW_ISO, collector_func=collector)
+            row = _event(self.conn, event_id)
+            self.assertEqual(row["event_state"], "active")
+            self.assertIsNone(row["inactive_reason"])
+
+        self.assertGreaterEqual(_event(self.conn, event_id)["consecutive_failures"], 3)
+
+
 class DryRunTests(unittest.TestCase):
     def setUp(self):
         self.conn = _make_conn()

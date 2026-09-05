@@ -154,3 +154,43 @@ tr.proposals-row td {
   padding: 0.2rem 0.5rem;
   font-size: 0.8rem;
 }
+
+.source-health {
+  margin-top: 0.3rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+
+.source-health-warning { background: #fef3c7; color: #92400e; }
+.source-health-repeated_failure { background: #fed7aa; color: #9a3412; }
+
+.source-health-review {
+  background: #fee2e2;
+  color: #991b1b;
+  font-weight: 600;
+  border: 1px solid #fca5a5;
+}
+
+.source-health-inactive { background: #f3f4f6; color: #6b7280; }
+
+.source-health-detail {
+  font-weight: 400;
+  opacity: 0.8;
+}
+
+.badge-inactive { background: #f3f4f6; color: #6b7280; margin-left: 0.3rem; }
+
+tr.event-inactive {
+  opacity: 0.6;
+}
+
+.btn-inactive,
+.btn-reactivate {
+  cursor: pointer;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 4px;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
+}

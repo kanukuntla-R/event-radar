@@ -27,7 +27,8 @@
     </thead>
     <tbody>
       {% for e in events %}
-      <tr class="status-{{ e['status'] }}">
+      {% set health = e | source_health %}
+      <tr class="status-{{ e['status'] }}{% if health.level == 'inactive' %} event-inactive{% endif %}">
         <td>
           <strong>{{ e['name'] }}</strong>
           {% if e['source_url'] %}<a href="{{ e['source_url'] }}" target="_blank" rel="noopener">source</a>{% endif %}
@@ -39,6 +40,16 @@
             {%- endif -%}
           </div>
           {% if e['description'] %}<div class="desc">{{ e['description'] }}</div>{% endif %}
+          {% if health.level == 'inactive' %}
+          <div class="source-health source-health-inactive">
+            Inactive{% if e['inactive_reason'] %} ({{ e['inactive_reason'] }}){% endif %}
+          </div>
+          {% elif health.level != 'healthy' %}
+          <div class="source-health source-health-{{ health.level }}">
+            {{ health.message }}
+            {% if e['last_successful_check'] %}<div class="source-health-detail">Last successful check: {{ e['last_successful_check'][:10] }}</div>{% endif %}
+          </div>
+          {% endif %}
         </td>
         <td>{{ e['event_type'] or '' }}</td>
         <td>{{ e | event_date }}</td>
@@ -47,8 +58,16 @@
           {% if e['location_type'] %}<span class="loc-type">({{ e['location_type'] }})</span>{% endif %}
         </td>
         <td><span class="badge reg-{{ e['registration_status'] or 'unknown' }}">{{ (e['registration_status'] or 'unknown').replace('_', ' ') }}</span></td>
-        <td><span class="badge badge-{{ e['status'] }}">{{ e['status'] }}</span></td>
+        <td>
+          <span class="badge badge-{{ e['status'] }}">{{ e['status'] }}</span>
+          {% if health.level == 'inactive' %}<span class="badge badge-inactive">inactive</span>{% endif %}
+        </td>
         <td class="actions">
+          {% if health.level == 'inactive' %}
+          <form method="post" action="{{ url_for('reactivate_route', event_id=e['id']) }}">
+            <button class="btn-reactivate">Reactivate</button>
+          </form>
+          {% else %}
           <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='interested') }}">
             <button {% if e['status'] == 'interested' %}disabled{% endif %}>Interested</button>
           </form>
@@ -58,6 +77,11 @@
           <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='ignore') }}">
             <button {% if e['status'] == 'ignored' %}disabled{% endif %}>Ignore</button>
           </form>
+          <form method="post" action="{{ url_for('mark_inactive_route', event_id=e['id']) }}">
+            <input type="hidden" name="inactive_reason" value="manual">
+            <button class="btn-inactive">Mark inactive</button>
+          </form>
+          {% endif %}
         </td>
       </tr>
       {% set proposals = proposals_by_event.get(e['id']) %}

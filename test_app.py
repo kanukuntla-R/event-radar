@@ -199,5 +199,114 @@ class ExistingBehaviorRegressionTests(AppTestCase):
         self.assertNotIn(b"Detected changes", resp.data)
 
 
+class SourceHealthDashboardTests(AppTestCase):
+    def test_healthy_active_event_shows_no_warning(self):
+        _insert_event(self.conn, consecutive_failures=0, last_check_status="ok")
+        html = self.client.get("/").data.decode()
+        self.assertNotIn("source-health-warning", html)
+        self.assertNotIn("source-health-review", html)
+
+    def test_failed_active_event_shows_source_issue(self):
+        _insert_event(self.conn, consecutive_failures=1, last_check_status="unavailable")
+        html = self.client.get("/").data.decode()
+        self.assertIn("source-health-warning", html)
+        self.assertIn("Recent source issue", html)
+
+    def test_three_or_more_failures_shows_review_recommended(self):
+        _insert_event(self.conn, consecutive_failures=3, last_check_status="unavailable")
+        html = self.client.get("/").data.decode()
+        self.assertIn("source-health-review", html)
+        self.assertIn("Source review recommended", html)
+
+    def test_inactive_event_does_not_show_active_source_warning(self):
+        _insert_event(
+            self.conn, event_state="inactive", inactive_reason="manual",
+            consecutive_failures=5, last_check_status="unavailable",
+        )
+        html = self.client.get("/").data.decode()
+        self.assertNotIn("source-health-review", html)
+        self.assertNotIn("Source review recommended", html)
+        self.assertIn("source-health-inactive", html)
+
+    def test_inactive_event_renders_with_badge_and_reactivate(self):
+        event_id = _insert_event(self.conn, event_state="inactive", inactive_reason="canceled")
+        html = self.client.get("/").data.decode()
+        self.assertIn("badge-inactive", html)
+        self.assertIn(f'/event/{event_id}/reactivate', html)
+
+
+class InactivateRouteTests(AppTestCase):
+    def test_post_inactive_changes_event_state(self):
+        event_id = _insert_event(self.conn, event_state="active")
+        resp = self.client.post(f"/event/{event_id}/inactive")
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(self._event(event_id)["event_state"], "inactive")
+
+    def test_post_inactive_sets_default_reason_manual(self):
+        event_id = _insert_event(self.conn)
+        self.client.post(f"/event/{event_id}/inactive")
+        self.assertEqual(self._event(event_id)["inactive_reason"], "manual")
+
+    def test_post_inactive_accepts_allowed_reason(self):
+        event_id = _insert_event(self.conn)
+        self.client.post(f"/event/{event_id}/inactive", data={"inactive_reason": "canceled"})
+        self.assertEqual(self._event(event_id)["inactive_reason"], "canceled")
+
+    def test_post_inactive_rejects_unknown_reason(self):
+        event_id = _insert_event(self.conn)
+        self.client.post(f"/event/{event_id}/inactive", data={"inactive_reason": "bogus"})
+        self.assertEqual(self._event(event_id)["inactive_reason"], "manual")
+
+    def test_inactive_does_not_touch_source_health_history(self):
+        event_id = _insert_event(
+            self.conn, consecutive_failures=4, last_check_status="unavailable",
+            last_checked="2026-09-01T00:00:00+00:00", last_successful_check="2026-08-01T00:00:00+00:00",
+        )
+        self.client.post(f"/event/{event_id}/inactive")
+        row = self._event(event_id)
+        self.assertEqual(row["consecutive_failures"], 4)
+        self.assertEqual(row["last_check_status"], "unavailable")
+        self.assertEqual(row["last_checked"], "2026-09-01T00:00:00+00:00")
+        self.assertEqual(row["last_successful_check"], "2026-08-01T00:00:00+00:00")
+
+    def test_get_inactive_is_not_allowed(self):
+        event_id = _insert_event(self.conn)
+        resp = self.client.get(f"/event/{event_id}/inactive")
+        self.assertEqual(resp.status_code, 405)
+        self.assertEqual(self._event(event_id)["event_state"], "active")
+
+
+class ReactivateRouteTests(AppTestCase):
+    def test_post_reactivate_restores_active(self):
+        event_id = _insert_event(self.conn, event_state="inactive", inactive_reason="manual")
+        resp = self.client.post(f"/event/{event_id}/reactivate")
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(self._event(event_id)["event_state"], "active")
+
+    def test_reactivate_clears_inactive_reason(self):
+        event_id = _insert_event(self.conn, event_state="inactive", inactive_reason="canceled")
+        self.client.post(f"/event/{event_id}/reactivate")
+        self.assertIsNone(self._event(event_id)["inactive_reason"])
+
+    def test_reactivate_preserves_source_health_history(self):
+        event_id = _insert_event(
+            self.conn, event_state="inactive", inactive_reason="manual",
+            consecutive_failures=3, last_check_status="not_found",
+            last_checked="2026-09-01T00:00:00+00:00", last_successful_check="2026-08-01T00:00:00+00:00",
+        )
+        self.client.post(f"/event/{event_id}/reactivate")
+        row = self._event(event_id)
+        self.assertEqual(row["consecutive_failures"], 3)
+        self.assertEqual(row["last_check_status"], "not_found")
+        self.assertEqual(row["last_checked"], "2026-09-01T00:00:00+00:00")
+        self.assertEqual(row["last_successful_check"], "2026-08-01T00:00:00+00:00")
+
+    def test_get_reactivate_is_not_allowed(self):
+        event_id = _insert_event(self.conn, event_state="inactive")
+        resp = self.client.get(f"/event/{event_id}/reactivate")
+        self.assertEqual(resp.status_code, 405)
+        self.assertEqual(self._event(event_id)["event_state"], "inactive")
+
+
 if __name__ == "__main__":
     unittest.main()
