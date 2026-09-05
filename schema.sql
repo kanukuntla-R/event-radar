@@ -45,3 +45,20 @@ CREATE TABLE IF NOT EXISTS events (
     first_seen TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Reviewable proposals for event *fact* changes detected by
+-- hackathon_change_detector. Nothing applies these to the events table
+-- automatically yet - that's a future accept/dismiss step.
+CREATE TABLE IF NOT EXISTS event_change_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL REFERENCES events(id),
+    field TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT NOT NULL,
+    evidence TEXT,
+    source_result TEXT,
+    detected_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'dismissed')),
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
