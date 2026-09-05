@@ -92,6 +92,21 @@ class DuplicateTests(unittest.TestCase):
         self.assertEqual(result["inserted"], [])
         self.assertEqual(len(result["duplicates_skipped"]), 1)
 
+    def test_cross_source_duplicate_reports_both_sources(self):
+        store_discovered_events(
+            self.conn, [_candidate(source="ASU Career Services", source_url="https://career.eoss.asu.edu/events/a/")],
+            discovered_at=DISCOVERED_AT,
+        )
+        result = store_discovered_events(
+            self.conn,
+            [_candidate(source="ASU Events", source_url="https://asuevents.asu.edu/event/b")],
+            discovered_at="2026-09-06T00:00:00+00:00",
+        )
+        self.assertEqual(len(result["duplicates_skipped"]), 1)
+        dup = result["duplicates_skipped"][0]
+        self.assertEqual(dup["existing_source"], "ASU Career Services")
+        self.assertEqual(dup["candidate_source"], "ASU Events")
+
     def test_existing_row_unchanged_after_duplicate_detected(self):
         first = store_discovered_events(self.conn, [_candidate()], discovered_at=DISCOVERED_AT)
         before = dict(self.conn.execute("SELECT * FROM events WHERE id = ?", (first["event_ids"][0],)).fetchone())

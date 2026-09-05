@@ -34,6 +34,34 @@ class SubtypeTests(unittest.TestCase):
     def test_unknown_is_other(self):
         self.assertEqual(classify_asu_event(_event("Peace Corps Prep at ASU")), "other")
 
+    def test_tech_event_via_nvidia(self):
+        result = classify_asu_event(_event(
+            "OpenUSD + NVIDIA Omniverse: Building the Future of 3D Worlds",
+            description="Explore how OpenUSD and NVIDIA Omniverse are changing 3D design, simulation, and physical AI.",
+        ))
+        self.assertEqual(result, "tech_event")
+
+    def test_tech_event_ai_word_boundary_not_substring(self):
+        # "ai" must not match inside unrelated words like "maintain"/"said"
+        self.assertEqual(classify_asu_event(_event("Maintaining Campus Traditions")), "other")
+        self.assertEqual(classify_asu_event(_event("AI in Practice")), "tech_event")
+
+    def test_research_subtype(self):
+        self.assertEqual(classify_asu_event(_event("Undergraduate Research Symposium")), "research")
+
+    def test_entrepreneurship_subtype(self):
+        self.assertEqual(classify_asu_event(_event("Startup Pitch Night")), "entrepreneurship")
+
+    def test_tech_event_outranks_research_and_entrepreneurship(self):
+        result = classify_asu_event(_event("Cybersecurity Research Startup Showcase"))
+        self.assertEqual(result, "tech_event")
+
+    def test_career_subtype_still_outranks_tech_event(self):
+        # workshop keyword ("resume") must still win over a coincidental
+        # tech word, preserving V0.8A ASU Career Services behavior.
+        result = classify_asu_event(_event("Software Engineer Resume Workshop"))
+        self.assertEqual(result, "workshop")
+
     def test_employer_keyword_outranks_info_session_keyword(self):
         # both "recruiter" (employer_event) and "information session" (info_session) present
         self.assertEqual(

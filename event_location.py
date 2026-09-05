@@ -4,7 +4,7 @@ location_area/priority. Deterministic keyword rules only - never guesses a
 city from an unfamiliar building name with no textual evidence.
 """
 
-ONLINE_KEYWORDS = ("virtual", "online", "webinar", "zoom.us", "teams.microsoft", "meet.google")
+ONLINE_KEYWORDS = ("virtual", "online", "webinar", "zoom", "teams.microsoft", "meet.google")
 HYBRID_KEYWORDS = ("hybrid",)
 
 # ASU-specific deterministic keyword -> area mapping. "poly"/"polytechnic" is
@@ -13,11 +13,15 @@ HYBRID_KEYWORDS = ("hybrid",)
 AREA_KEYWORDS = (
     ("tempe", "tempe"),
     ("scottsdale", "scottsdale"),
+    ("skysong", "scottsdale"),
     ("chandler", "chandler"),
     ("polytechnic", "mesa"),
     ("poly,", "mesa"),
     ("poly ", "mesa"),
     ("mesa", "mesa"),
+    # Thunderbird School of Global Management's ASU campus is physically in
+    # downtown Phoenix - a fixed fact, same category as the "poly" mapping.
+    ("thunderbird", "phoenix"),
     ("downtown phoenix", "phoenix"),
     ("phoenix", "phoenix"),
 )

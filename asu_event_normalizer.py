@@ -18,7 +18,7 @@ MONTHS = {
 MONTH_PATTERN = "|".join(sorted(MONTHS, key=len, reverse=True))
 DATE_RE = re.compile(rf"\b({MONTH_PATTERN})\s+(\d{{1,2}}),\s*(\d{{4}})\b", re.IGNORECASE)
 TIME_RE = re.compile(
-    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*-\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)",
+    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*(?:-|–|—)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)",
     re.IGNORECASE,
 )
 ALL_DAY_KEYWORDS = ("all day", "all-day")
@@ -69,7 +69,8 @@ def parse_date_range(date_text):
     """
     if not date_text:
         return None, None
-    parts = re.split(r"\s+-\s+", date_text, maxsplit=1)
+    date_text = html.unescape(date_text)
+    parts = re.split(r"\s+(?:-|–|—)\s+", date_text, maxsplit=1)
     start = _parse_date_component(parts[0])
     end = _parse_date_component(parts[1]) if len(parts) > 1 else start
     return start, end
@@ -92,6 +93,7 @@ def parse_time_range(time_text):
     """
     if not time_text:
         return None, None
+    time_text = html.unescape(time_text)
     match = TIME_RE.search(time_text)
     if not match:
         return None, None
@@ -106,7 +108,7 @@ def is_explicit_all_day(time_text):
     """
     if not time_text:
         return False
-    return any(kw in time_text.strip().lower() for kw in ALL_DAY_KEYWORDS)
+    return any(kw in html.unescape(time_text).strip().lower() for kw in ALL_DAY_KEYWORDS)
 
 
 def normalize_candidate(raw):

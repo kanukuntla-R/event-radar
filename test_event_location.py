@@ -52,6 +52,12 @@ class OnlineTests(unittest.TestCase):
         self.assertEqual(result["location_type"], "online")
         self.assertEqual(result["location_area"], "online")
 
+    def test_bare_zoom_platform_name_is_online(self):
+        # ASU Events detail pages sometimes give just "Zoom" as the
+        # location (no URL) - found live during V0.8B testing.
+        result = classify_location("Zoom")
+        self.assertEqual(result["location_area"], "online")
+
     def test_hybrid(self):
         result = classify_location("Hybrid - Tempe or Zoom")
         self.assertEqual(result["location_type"], "hybrid")
@@ -65,12 +71,22 @@ class UnknownTests(unittest.TestCase):
         self.assertEqual(result["location_type"], "in_person")
 
     def test_does_not_guess_city_from_unfamiliar_building_name(self):
-        result = classify_location("Thunderbird School of Global Management")
+        result = classify_location("Wexler Hall, Room 101")
         self.assertEqual(result["location_area"], "other")
 
     def test_named_city_in_building_name_is_used(self):
-        result = classify_location("Thunderbird School of Global Management, Phoenix, AZ")
+        result = classify_location("Some Unmapped Building, Phoenix, AZ")
         self.assertEqual(result["location_area"], "phoenix")
+
+    def test_thunderbird_campus_is_a_known_phoenix_mapping(self):
+        # Thunderbird School of Global Management's ASU campus is physically
+        # in downtown Phoenix - a fixed fact (like "poly"->mesa), not a guess.
+        result = classify_location("Thunderbird School of Global Management")
+        self.assertEqual(result["location_area"], "phoenix")
+
+    def test_skysong_is_a_known_scottsdale_mapping(self):
+        result = classify_location("SkySong, the ASU Scottsdale Innovation Center")
+        self.assertEqual(result["location_area"], "scottsdale")
 
 
 class EmptyInputTests(unittest.TestCase):

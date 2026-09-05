@@ -87,12 +87,17 @@ def store_discovered_events(conn, candidates, discovered_at=None, dry_run=False)
             for prior in accepted_this_batch:
                 batch_reason = match_reason(candidate, prior)
                 if batch_reason:
-                    dup = {"is_duplicate": True, "existing_event_id": None, "reason": batch_reason}
+                    dup = {
+                        "is_duplicate": True, "existing_event_id": None,
+                        "reason": batch_reason, "existing_source": prior.get("source"),
+                    }
                     break
 
         if dup["is_duplicate"]:
             duplicates.append({
                 "name": candidate.get("name"), "existing_event_id": dup["existing_event_id"],
+                "existing_source": dup.get("existing_source"),
+                "candidate_source": candidate.get("source"),
                 "reason": dup["reason"],
             })
             continue

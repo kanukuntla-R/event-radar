@@ -132,5 +132,185 @@ class MatchReasonUnitTests(unittest.TestCase):
         self.assertIsNone(match_reason(_candidate(), existing))
 
 
+class CrossSourceDedupTests(unittest.TestCase):
+    """V0.8B: the fallback match must work across two different sources
+    with two different URLs for the same real-world event."""
+
+    def setUp(self):
+        self.conn = _make_conn()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_same_event_different_source_and_url_is_duplicate(self):
+        event_id = _insert_event(
+            self.conn, name="Fall 2026 Career & Internship Fair",
+            source="ASU Career Services", source_url="https://career.eoss.asu.edu/events/fair/",
+            start_date="2026-10-01", location="Tempe, ECG",
+        )
+        candidate = _candidate(
+            name="Fall 2026 Career and Internship Fair", source="ASU Events",
+            source_url="https://asuevents.asu.edu/event/fall-career-fair",
+            start_date="2026-10-01", location="Tempe, ECG",
+        )
+        result = find_duplicate(self.conn, candidate)
+        self.assertTrue(result["is_duplicate"])
+        self.assertEqual(result["existing_event_id"], event_id)
+        self.assertEqual(result["existing_source"], "ASU Career Services")
+        self.assertEqual(result["reason"], "same_name_date_location")
+
+    def test_ampersand_vs_and_normalized(self):
+        self.assertEqual(
+            match_reason(
+                _candidate(name="Career & Internship Fair"),
+                {"name": "Career and Internship Fair", "source_url": "https://x.example.com/a",
+                 "start_date": "2026-09-10", "location": "Tempe"},
+            ),
+            "same_name_date_location",
+        )
+
+    def test_punctuation_and_case_differences_normalized(self):
+        self.assertEqual(
+            match_reason(
+                _candidate(name="  CAREER FAIR!!  "),
+                {"name": "career fair", "source_url": "https://x.example.com/a",
+                 "start_date": "2026-09-10", "location": "Tempe"},
+            ),
+            "same_name_date_location",
+        )
+
+    def test_same_title_different_date_is_not_duplicate(self):
+        _insert_event(self.conn, name="Career Fair", start_date="2026-09-10")
+        candidate = _candidate(name="Career Fair", start_date="2026-11-01", source_url="https://other.example.com/x")
+        result = find_duplicate(self.conn, candidate)
+        self.assertFalse(result["is_duplicate"])
+
+    def test_same_date_incompatible_location_is_not_duplicate(self):
+        _insert_event(self.conn, name="Career Fair", start_date="2026-09-10", location="Tempe campus")
+        candidate = _candidate(
+            name="Career Fair", start_date="2026-09-10", location="Downtown Phoenix campus",
+            source_url="https://other.example.com/x",
+        )
+        result = find_duplicate(self.conn, candidate)
+        self.assertFalse(result["is_duplicate"])
+
+    def test_incompatible_start_time_is_not_duplicate(self):
+        _insert_event(self.conn, name="Office Hours", start_date="2026-09-10", start_time="10:00")
+        candidate = _candidate(
+            name="Office Hours", start_date="2026-09-10", start_time="16:00",
+            source_url="https://other.example.com/x",
+        )
+        result = find_duplicate(self.conn, candidate)
+        self.assertFalse(result["is_duplicate"])
+
+    def test_missing_start_time_on_one_side_is_still_compatible(self):
+        _insert_event(self.conn, name="Office Hours", start_date="2026-09-10", start_time=None)
+        candidate = _candidate(
+            name="Office Hours", start_date="2026-09-10", start_time="10:00",
+            source_url="https://other.example.com/x",
+        )
+        result = find_duplicate(self.conn, candidate)
+        self.assertTrue(result["is_duplicate"])
+
+    def test_similar_generic_titles_do_not_merge(self):
+        _insert_event(self.conn, name="Career Quick Takes: Career Exploration", start_date="2026-09-08")
+        candidate = _candidate(
+            name="Career Quick Takes: Job or Internship Search", start_date="2026-09-08",
+            source_url="https://other.example.com/x",
+        )
+        result = find_duplicate(self.conn, candidate)
+        self.assertFalse(result["is_duplicate"])
+
+    def test_existing_row_never_modified(self):
+        event_id = _insert_event(self.conn, name="Career Fair", start_date="2026-09-10")
+        before = dict(self.conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone())
+        find_duplicate(self.conn, _candidate(name="Career Fair", start_date="2026-09-10", source_url="https://other.example.com/x"))
+        after = dict(self.conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone())
+        self.assertEqual(before, after)
+
+
+class UnknownLocationCompatibilityTests(unittest.TestCase):
+    """'other' means unmapped/unknown, not a shared physical place - two
+    different unrecognized buildings must never match just because neither
+    was recognized."""
+
+    def setUp(self):
+        self.conn = _make_conn()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_different_raw_locations_both_area_other_is_not_duplicate(self):
+        _insert_event(
+            self.conn, name="Research Symposium", start_date="2026-09-20",
+            start_time="10:00", location="Biodesign Auditorium",
+        )
+        candidate = _candidate(
+            name="Research Symposium", start_date="2026-09-20", start_time="10:00",
+            location="Wexler Hall", source_url="https://other.example.com/x",
+        )
+        result = find_duplicate(self.conn, candidate)
+        self.assertFalse(result["is_duplicate"])
+
+    def test_identical_raw_unknown_location_is_duplicate(self):
+        event_id = _insert_event(
+            self.conn, name="Research Symposium", start_date="2026-09-20",
+            start_time="10:00", location="Wexler Hall",
+        )
+        candidate = _candidate(
+            name="Research Symposium", start_date="2026-09-20", start_time="10:00",
+            location="Wexler Hall", source_url="https://other.example.com/x",
+        )
+        result = find_duplicate(self.conn, candidate)
+        self.assertTrue(result["is_duplicate"])
+        self.assertEqual(result["existing_event_id"], event_id)
+
+    def test_tempe_text_variants_are_duplicate_via_meaningful_area(self):
+        _insert_event(self.conn, name="Career Fair", start_date="2026-09-10", location="Tempe, ECG")
+        candidate = _candidate(
+            name="Career Fair", start_date="2026-09-10", location="Tempe campus",
+            source_url="https://other.example.com/x",
+        )
+        result = find_duplicate(self.conn, candidate)
+        self.assertTrue(result["is_duplicate"])
+
+    def test_zoom_vs_online_event_is_duplicate_via_online_area(self):
+        _insert_event(self.conn, name="Office Hours", start_date="2026-09-08", location="Zoom")
+        candidate = _candidate(
+            name="Office Hours", start_date="2026-09-08", location="Online event",
+            source_url="https://other.example.com/x",
+        )
+        result = find_duplicate(self.conn, candidate)
+        self.assertTrue(result["is_duplicate"])
+
+    def test_tempe_vs_phoenix_is_not_duplicate(self):
+        _insert_event(self.conn, name="Career Fair", start_date="2026-09-10", location="Tempe campus")
+        candidate = _candidate(
+            name="Career Fair", start_date="2026-09-10", location="Downtown Phoenix campus",
+            source_url="https://other.example.com/x",
+        )
+        result = find_duplicate(self.conn, candidate)
+        self.assertFalse(result["is_duplicate"])
+
+    def test_one_side_missing_location_still_compatible(self):
+        _insert_event(self.conn, name="Career Fair", start_date="2026-09-10", location=None)
+        candidate = _candidate(
+            name="Career Fair", start_date="2026-09-10", location="Wexler Hall",
+            source_url="https://other.example.com/x",
+        )
+        result = find_duplicate(self.conn, candidate)
+        self.assertTrue(result["is_duplicate"])
+
+    def test_existing_row_never_modified_for_other_area_case(self):
+        event_id = _insert_event(self.conn, name="Research Symposium", start_date="2026-09-20", location="Biodesign Auditorium")
+        before = dict(self.conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone())
+        find_duplicate(self.conn, _candidate(
+            name="Research Symposium", start_date="2026-09-20", location="Wexler Hall",
+            source_url="https://other.example.com/x",
+        ))
+        after = dict(self.conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone())
+        self.assertEqual(before, after)
+
+
 if __name__ == "__main__":
     unittest.main()
