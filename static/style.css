@@ -101,3 +101,56 @@ tr.status-ignored {
   background: #e5e7eb;
   cursor: default;
 }
+
+.proposal-error {
+  background: #fee2e2;
+  color: #991b1b;
+  padding: 0.6rem 0.8rem;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+}
+
+tr.proposals-row td {
+  background: #fffbeb;
+  border-bottom: 1px solid #eee;
+}
+
+.proposals-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+  margin-bottom: 0.4rem;
+}
+
+.proposal {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+  padding: 0.25rem 0;
+}
+
+.proposal-field {
+  font-weight: 600;
+  min-width: 9rem;
+}
+
+.proposal-evidence,
+.proposal-detected {
+  color: #888;
+}
+
+.proposal-actions {
+  display: flex;
+  gap: 0.3rem;
+  margin-left: auto;
+}
+
+.proposal-actions button {
+  cursor: pointer;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+}

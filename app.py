@@ -4,6 +4,7 @@ from flask import Flask, render_template, redirect, url_for, Response, abort
 
 from db import get_db, init_db
 from calendar_service import generate_ics
+from proposal_resolver import accept_proposal, dismiss_proposal, StaleProposalError
 
 app = Flask(__name__)
 
@@ -13,7 +14,29 @@ ACTION_TO_STATUS = {
     "ignore": "ignored",
 }
 
+FIELD_LABELS = {
+    "start_date": "Start date",
+    "end_date": "End date",
+    "date_status": "Date status",
+    "registration_status": "Registration status",
+    "registration_url": "Registration URL",
+    "application_deadline": "Application deadline",
+}
+
 init_db()
+
+
+@app.template_filter("field_label")
+def field_label(field):
+    return FIELD_LABELS.get(field, field)
+
+
+@app.template_filter("proposal_value")
+def format_proposal_value(value):
+    if value in (None, ""):
+        return "Not set"
+    text = str(value).replace("_", " ")
+    return text if "://" in text else text[:1].upper() + text[1:]
 
 
 def _fmt_date(d):
@@ -47,14 +70,36 @@ def format_event_date(e):
     return date_label
 
 
-@app.route("/")
-def index():
-    conn = get_db()
-    events = conn.execute(
+def _load_dashboard_events(conn):
+    return conn.execute(
         "SELECT * FROM events ORDER BY status = 'ignored', start_date IS NULL, start_date, name"
     ).fetchall()
+
+
+def _load_pending_proposals(conn):
+    rows = conn.execute(
+        "SELECT * FROM event_change_proposals WHERE status = 'pending' "
+        "ORDER BY detected_at, id"
+    ).fetchall()
+    by_event = {}
+    for row in rows:
+        by_event.setdefault(row["event_id"], []).append(row)
+    return by_event
+
+
+def _render_dashboard(error=None):
+    conn = get_db()
+    events = _load_dashboard_events(conn)
+    proposals_by_event = _load_pending_proposals(conn)
     conn.close()
-    return render_template("index.html", events=events)
+    return render_template(
+        "index.html", events=events, proposals_by_event=proposals_by_event, error=error
+    )
+
+
+@app.route("/")
+def index():
+    return _render_dashboard()
 
 
 @app.route("/event/<int:event_id>/<action>", methods=["POST"])
@@ -67,6 +112,33 @@ def set_status(event_id, action):
         (ACTION_TO_STATUS[action], event_id),
     )
     conn.commit()
+    conn.close()
+    return redirect(url_for("index"))
+
+
+@app.route("/proposal/<int:proposal_id>/accept", methods=["POST"])
+def accept_proposal_route(proposal_id):
+    conn = get_db()
+    try:
+        accept_proposal(conn, proposal_id)
+    except StaleProposalError as e:
+        conn.close()
+        return _render_dashboard(error=str(e))
+    except (LookupError, ValueError) as e:
+        conn.close()
+        return _render_dashboard(error=f"Could not accept proposal {proposal_id}: {e}")
+    conn.close()
+    return redirect(url_for("index"))
+
+
+@app.route("/proposal/<int:proposal_id>/dismiss", methods=["POST"])
+def dismiss_proposal_route(proposal_id):
+    conn = get_db()
+    try:
+        dismiss_proposal(conn, proposal_id)
+    except (LookupError, ValueError) as e:
+        conn.close()
+        return _render_dashboard(error=f"Could not dismiss proposal {proposal_id}: {e}")
     conn.close()
     return redirect(url_for("index"))
 

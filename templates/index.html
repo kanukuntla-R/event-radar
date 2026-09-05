@@ -11,6 +11,8 @@
     <a class="ics-link" href="{{ url_for('calendar_ics') }}">Subscribe to Interested events (.ics)</a>
   </header>
 
+  {% if error %}<div class="proposal-error">{{ error }}</div>{% endif %}
+
   <table>
     <thead>
       <tr>
@@ -58,6 +60,32 @@
           </form>
         </td>
       </tr>
+      {% set proposals = proposals_by_event.get(e['id']) %}
+      {% if proposals %}
+      <tr class="proposals-row">
+        <td colspan="7">
+          <div class="proposals">
+            <div class="proposals-title">Detected changes</div>
+            {% for p in proposals %}
+            <div class="proposal">
+              <div class="proposal-field">{{ p['field'] | field_label }}</div>
+              <div class="proposal-diff">{{ p['old_value'] | proposal_value }} &rarr; {{ p['new_value'] | proposal_value }}</div>
+              {% if p['evidence'] %}<div class="proposal-evidence">Evidence: {{ p['evidence'] }}</div>{% endif %}
+              <div class="proposal-detected">Detected {{ p['detected_at'][:10] }}</div>
+              <div class="proposal-actions">
+                <form method="post" action="{{ url_for('accept_proposal_route', proposal_id=p['id']) }}">
+                  <button>Accept</button>
+                </form>
+                <form method="post" action="{{ url_for('dismiss_proposal_route', proposal_id=p['id']) }}">
+                  <button>Dismiss</button>
+                </form>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </td>
+      </tr>
+      {% endif %}
       {% endfor %}
     </tbody>
   </table>
