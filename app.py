@@ -62,6 +62,11 @@ def candidate_type_label(candidate_type):
     return CANDIDATE_TYPE_LABELS.get(candidate_type, candidate_type)
 
 
+@app.template_filter("subtype_label")
+def subtype_label(subtype):
+    return (subtype or "").replace("_", " ").title()
+
+
 def _fmt_date(d):
     return f"{d.strftime('%b')} {d.day}, {d.year}"
 
@@ -237,7 +242,8 @@ def dismiss_recovery_candidate_route(candidate_id):
 def calendar_ics():
     conn = get_db()
     events = conn.execute(
-        "SELECT * FROM events WHERE status = 'interested' ORDER BY start_date"
+        "SELECT * FROM events WHERE status = 'interested' AND event_state = 'active' "
+        "ORDER BY start_date"
     ).fetchall()
     conn.close()
     return Response(

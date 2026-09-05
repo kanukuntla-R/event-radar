@@ -30,6 +30,12 @@
       {% set health = e | source_health %}
       <tr class="status-{{ e['status'] }}{% if health.level == 'inactive' %} event-inactive{% endif %}">
         <td>
+          {% if e['event_type'] == 'asu' %}
+          <div class="asu-tags">
+            <span class="badge badge-asu">ASU</span>
+            {% if e['event_subtype'] %}<span class="badge badge-subtype">{{ e['event_subtype'] | subtype_label }}</span>{% endif %}
+          </div>
+          {% endif %}
           <strong>{{ e['name'] }}</strong>
           {% if e['source_url'] %}<a href="{{ e['source_url'] }}" target="_blank" rel="noopener">source</a>{% endif %}
           <div class="meta">
@@ -37,6 +43,9 @@
             {%- if e['organizer'] and e['travel_required'] is not none %} &middot; {% endif -%}
             {%- if e['travel_required'] is not none -%}
               {{ '✈ Travel' if e['travel_required'] else '🏠 Local' }}
+            {%- endif -%}
+            {%- if e['event_type'] == 'asu' and e['location_area'] -%}
+              {%- if e['organizer'] %} &middot; {% endif -%}{{ e['location_area'] | capitalize }}
             {%- endif -%}
           </div>
           {% if e['description'] %}<div class="desc">{{ e['description'] }}</div>{% endif %}

@@ -27,6 +27,8 @@ NEW_COLUMNS = {
     "last_check_status": "TEXT",
     "consecutive_failures": "INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0)",
     "last_successful_check": "TEXT",
+    "event_subtype": "TEXT",
+    "location_area": "TEXT",
 }
 
 

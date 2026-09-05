@@ -41,6 +41,13 @@ CREATE TABLE IF NOT EXISTS events (
     last_check_status TEXT,
     consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
     last_successful_check TEXT,
+    -- event_subtype: nullable, no CHECK yet (discovery categories will grow).
+    -- V0.8A values: career_fair | employer_event | networking | info_session |
+    -- workshop | career_services | other
+    event_subtype TEXT,
+    -- location_area: nullable. V0.8A values: tempe | scottsdale | chandler |
+    -- phoenix | mesa | online | hybrid | other (see event_location.py)
+    location_area TEXT,
     status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'interested', 'watching', 'ignored')),
     first_seen TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))

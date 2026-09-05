@@ -391,5 +391,91 @@ class SourceRecoveryRouteTests(AppTestCase):
         self.assertEqual(resp.status_code, 405)
 
 
+class AsuDashboardTests(AppTestCase):
+    def test_asu_badge_shown(self):
+        _insert_event(self.conn, name="Discovery Day with Viasat", event_type="asu")
+        html = self.client.get("/").data.decode()
+        self.assertIn("badge-asu", html)
+        self.assertIn(">ASU<", html)
+
+    def test_subtype_visible(self):
+        _insert_event(self.conn, name="Discovery Day with Viasat", event_type="asu", event_subtype="employer_event")
+        html = self.client.get("/").data.decode()
+        self.assertIn("Employer Event", html)
+
+    def test_location_area_visible(self):
+        _insert_event(self.conn, name="Resume Workshop", event_type="asu", location_area="tempe")
+        html = self.client.get("/").data.decode()
+        self.assertIn("Tempe", html)
+
+    def test_non_asu_event_has_no_asu_badge(self):
+        _insert_event(self.conn, name="MHacks", event_type="hackathon")
+        html = self.client.get("/").data.decode()
+        self.assertNotIn("badge-asu", html)
+
+    def test_existing_status_controls_still_work_for_asu_event(self):
+        event_id = _insert_event(self.conn, event_type="asu")
+        resp = self.client.post(f"/event/{event_id}/interested")
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(self._event(event_id)["status"], "interested")
+
+
+class CalendarLifecycleRegressionTests(AppTestCase):
+    def test_interested_active_event_appears_in_ics(self):
+        _insert_event(self.conn, name="Career Fair", status="interested", event_state="active")
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertIn("SUMMARY:Career Fair", ics)
+
+    def test_interested_inactive_event_excluded_from_ics(self):
+        _insert_event(self.conn, name="Canceled Fair", status="interested", event_state="inactive")
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertNotIn("Canceled Fair", ics)
+
+    def test_marking_inactive_preserves_interested_status(self):
+        event_id = _insert_event(self.conn, name="Career Fair", status="interested", event_state="active")
+        self.client.post(f"/event/{event_id}/inactive")
+        self.assertEqual(self._event(event_id)["status"], "interested")
+        self.assertEqual(self._event(event_id)["event_state"], "inactive")
+
+    def test_marking_inactive_removes_event_from_ics(self):
+        event_id = _insert_event(self.conn, name="Career Fair", status="interested", event_state="active")
+        self.client.post(f"/event/{event_id}/inactive")
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertNotIn("Career Fair", ics)
+
+    def test_reactivating_returns_event_to_ics(self):
+        event_id = _insert_event(self.conn, name="Career Fair", status="interested", event_state="inactive")
+        ics_before = self.client.get("/calendar.ics").data.decode()
+        self.assertNotIn("Career Fair", ics_before)
+
+        self.client.post(f"/event/{event_id}/reactivate")
+        self.assertEqual(self._event(event_id)["status"], "interested")
+        ics_after = self.client.get("/calendar.ics").data.decode()
+        self.assertIn("SUMMARY:Career Fair", ics_after)
+
+    def test_tba_no_date_event_still_excluded(self):
+        _insert_event(self.conn, name="TBA Event", status="interested", event_state="active",
+                       date_status="tba", start_date=None)
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertNotIn("TBA Event", ics)
+
+    def test_non_interested_active_event_excluded(self):
+        _insert_event(self.conn, name="Just Watching", status="watching", event_state="active")
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertNotIn("Just Watching", ics)
+
+    def test_genuine_all_day_event_still_renders_as_all_day(self):
+        # start_time=None here represents a real all-day event (e.g. a
+        # hackathon with only a date) - unrelated to the ASU discovery-time
+        # validation, which prevents this state from ever being *inserted*
+        # for an ASU candidate with incomplete time evidence. Once a row
+        # legitimately has start_time=None, ICS rendering must still treat
+        # it as all-day.
+        _insert_event(self.conn, name="Local Hack Day", status="interested", event_state="active", start_time=None)
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertIn("SUMMARY:Local Hack Day", ics)
+        self.assertIn("DTSTART;VALUE=DATE:", ics)
+
+
 if __name__ == "__main__":
     unittest.main()
