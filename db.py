@@ -16,6 +16,12 @@ NEW_COLUMNS = {
     "start_time": "TEXT",
     "end_time": "TEXT",
     "timezone": "TEXT",
+    "organizer": "TEXT",
+    "registration_status": "TEXT",
+    "registration_url": "TEXT",
+    "application_deadline": "TEXT",
+    "last_checked": "TEXT",
+    "travel_required": "INTEGER",
 }
 
 

@@ -49,6 +49,12 @@ th {
   margin-top: 0.2rem;
 }
 
+.meta {
+  color: #888;
+  font-size: 0.8rem;
+  margin-top: 0.15rem;
+}
+
 .loc-type {
   color: #888;
   font-size: 0.85rem;
@@ -66,6 +72,11 @@ th {
 .badge-interested { background: #dcfce7; color: #166534; }
 .badge-watching { background: #fef9c3; color: #854d0e; }
 .badge-ignored { background: #f3f4f6; color: #6b7280; }
+
+.reg-unknown { background: #f3f4f6; color: #6b7280; }
+.reg-not_open { background: #fef3c7; color: #92400e; }
+.reg-open { background: #dcfce7; color: #166534; }
+.reg-closed { background: #fee2e2; color: #991b1b; }
 
 tr.status-ignored {
   opacity: 0.5;
