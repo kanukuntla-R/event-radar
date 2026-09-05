@@ -1,7 +1,9 @@
 """CLI: run one ASU Events (asuevents.asu.edu) discovery pass against the
 real site and real DB. Only "include"-decision events (per
 asu_event_relevance.py's deterministic policy) are ever inserted; "review"
-and "exclude" are reported only. Never marks anything Interested.
+candidates are stored in the review queue (event_review_candidates) for
+manual accept/dismiss from the dashboard, never inserted directly;
+"exclude" is reported only. Never marks anything Interested.
 
 Usage:
     python run_asu_events_discovery.py
@@ -11,14 +13,6 @@ import sys
 
 from db import get_db
 from asu_events_discovery_runner import run_asu_events_discovery
-
-
-def _fmt_candidate(candidate):
-    date = candidate.get("start_date") or "?"
-    time_part = f" {candidate['start_time']}" if candidate.get("start_time") else ""
-    location = candidate.get("location") or "?"
-    subtype = candidate.get("event_subtype") or "?"
-    return f"  {date}{time_part} | {location} | {subtype}"
 
 
 def main():
@@ -32,7 +26,8 @@ def main():
     conn.close()
 
     new_events = [e for e in result["events"] if e["result"] == "new"]
-    reviews = [e for e in result["events"] if e["result"] == "review"]
+    review_stored = [e for e in result["events"] if e["result"] == "review_stored"]
+    review_existing = [e for e in result["events"] if e["result"] == "review_existing"]
     duplicates = [e for e in result["events"] if e["result"] == "duplicate"]
     invalids = [e for e in result["events"] if e["result"] == "invalid"]
     errors = [e for e in result["events"] if e["result"] == "runner_error"]
@@ -42,13 +37,14 @@ def main():
         print(f"  {e['name']} (event id {e['event_id']})")
     print()
 
-    print(f"REVIEW ({len(reviews)}):")
-    for e in reviews:
-        c = e["candidate"]
-        print(f"{e['name']}")
-        print(_fmt_candidate(c))
-        print(f"  reason: {e['relevance']['reason']} | signals: {', '.join(e['relevance']['signals']) or '(none)'}")
-        print(f"  source: {c.get('source_url')}")
+    print(f"REVIEW STORED ({len(review_stored)}):")
+    for e in review_stored:
+        print(f"  {e['name']} (review id {e['review_id']})")
+    print()
+
+    print(f"REVIEW EXISTING ({len(review_existing)}):")
+    for e in review_existing:
+        print(f"  {e['name']} -> review id {e['review_id']} (status: {e['status']}, reason: {e['reason']})")
     print()
 
     print(f"DUPLICATE ({len(duplicates)}):")
@@ -75,6 +71,8 @@ def main():
     print(f"Excluded: {s['excluded']}")
     print(f"Inserted: {s['inserted']}")
     print(f"Duplicates skipped: {s['duplicates_skipped']}")
+    print(f"Review stored: {s['review_stored']}")
+    print(f"Review existing: {s['review_existing']}")
     print(f"Invalid skipped: {s['invalid_skipped']}")
     print(f"Runner errors: {s['runner_errors']}")
 

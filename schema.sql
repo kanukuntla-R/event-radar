@@ -90,3 +90,36 @@ CREATE TABLE IF NOT EXISTS source_recovery_candidates (
     resolved_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ASU Events discovery candidates the relevance filter (asu_event_relevance.py)
+-- marked "review" - held for human accept/dismiss, never auto-inserted into
+-- events. Accepting one runs it through the exact same
+-- validation/dedup path as a normal discovered event (see
+-- event_review_resolver.py); it is never marked Interested automatically.
+CREATE TABLE IF NOT EXISTS event_review_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    event_type TEXT,
+    event_subtype TEXT,
+    description TEXT,
+    start_date TEXT,
+    end_date TEXT,
+    start_time TEXT,
+    end_time TEXT,
+    timezone TEXT,
+    location TEXT,
+    location_type TEXT,
+    location_area TEXT,
+    source TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    organizer TEXT,
+    registration_status TEXT,
+    registration_url TEXT,
+    application_deadline TEXT,
+    review_reason TEXT,
+    review_signals TEXT,
+    discovered_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'dismissed')),
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

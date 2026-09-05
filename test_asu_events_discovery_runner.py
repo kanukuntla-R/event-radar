@@ -58,13 +58,25 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(row["event_type"], "asu")
         self.assertEqual(row["status"], "new")
 
-    def test_review_not_inserted(self):
+    def test_review_not_inserted_into_events_but_stored_in_review_queue(self):
         raw = _raw(name="Maosho", categories=["Academic events"])
         result = run_asu_events_discovery(self.conn, collect_func=_fake_collect([raw]), discovered_at=DISCOVERED_AT)
         self.assertEqual(result["summary"]["review"], 1)
+        self.assertEqual(result["summary"]["review_stored"], 1)
         self.assertEqual(result["summary"]["inserted"], 0)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
-        self.assertEqual(_entries(result, "review")[0]["name"], "Maosho")
+        self.assertEqual(_entries(result, "review_stored")[0]["name"], "Maosho")
+        review_row = self.conn.execute("SELECT * FROM event_review_candidates").fetchone()
+        self.assertEqual(review_row["name"], "Maosho")
+        self.assertEqual(review_row["status"], "pending")
+
+    def test_repeated_discovery_does_not_duplicate_pending_review(self):
+        raw = _raw(name="Maosho", categories=["Academic events"])
+        run_asu_events_discovery(self.conn, collect_func=_fake_collect([raw]), discovered_at=DISCOVERED_AT)
+        result = run_asu_events_discovery(self.conn, collect_func=_fake_collect([raw]), discovered_at="2026-09-06T00:00:00+00:00")
+        self.assertEqual(result["summary"]["review_stored"], 0)
+        self.assertEqual(result["summary"]["review_existing"], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM event_review_candidates").fetchone()[0], 1)
 
     def test_exclude_not_inserted(self):
         raw = _raw(name="Sun Devil Soccer vs. North Carolina", categories=["Sports"])
@@ -94,7 +106,8 @@ class PipelineTests(unittest.TestCase):
         result = run_asu_events_discovery(self.conn, collect_func=_fake_collect(raws, pages_fetched=2), discovered_at=DISCOVERED_AT)
         self.assertEqual(result["summary"], {
             "pages_fetched": 2, "candidates_found": 3, "included": 1, "review": 1, "excluded": 1,
-            "inserted": 1, "duplicates_skipped": 0, "invalid_skipped": 0, "runner_errors": 0,
+            "inserted": 1, "duplicates_skipped": 0, "review_stored": 1, "review_existing": 0,
+            "invalid_skipped": 0, "runner_errors": 0,
         })
 
     def test_bad_candidate_isolated_from_others(self):
@@ -121,9 +134,12 @@ class DryRunTests(unittest.TestCase):
         self.conn.close()
 
     def test_dry_run_zero_db_writes(self):
-        result = run_asu_events_discovery(self.conn, collect_func=_fake_collect([_raw()]), discovered_at=DISCOVERED_AT, dry_run=True)
+        raws = [_raw(), _raw(name="Maosho", categories=["Academic events"], source_url="https://asuevents.asu.edu/event/b")]
+        result = run_asu_events_discovery(self.conn, collect_func=_fake_collect(raws), discovered_at=DISCOVERED_AT, dry_run=True)
         self.assertEqual(result["summary"]["included"], 1)
+        self.assertEqual(result["summary"]["review_stored"], 1)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM event_review_candidates").fetchone()[0], 0)
 
     def test_dry_run_still_performs_discovery_and_relevance(self):
         raws = [_raw(), _raw(name="Sun Devil Soccer", categories=["Sports"], source_url="https://asuevents.asu.edu/event/b")]

@@ -147,5 +147,42 @@
       {% endfor %}
     </tbody>
   </table>
+
+  {% if reviews %}
+  <section class="review-queue">
+    <h2>Events to Review</h2>
+    <p class="review-queue-hint">Discovered by ASU Events but not clearly relevant - accept to add as a normal (New) event, or dismiss to ignore.</p>
+    {% for r in reviews %}
+    <div class="review-item">
+      <div class="review-item-header">
+        <span class="badge badge-asu">ASU</span>
+        {% if r['event_subtype'] %}<span class="badge badge-subtype">{{ r['event_subtype'] | subtype_label }}</span>{% endif %}
+        <strong>{{ r['name'] }}</strong>
+      </div>
+      <div class="review-item-meta">
+        {{ r | review_date }}
+        {% if r['location'] %} &middot; {{ r['location'] }}{% endif %}
+        {% if r['source'] %} &middot; {{ r['source'] }}{% endif %}
+      </div>
+      {% if r['description'] %}<div class="desc review-item-desc">{{ r['description'][:220] }}{% if r['description']|length > 220 %}&hellip;{% endif %}</div>{% endif %}
+      <div class="review-item-reason">Reason: {{ r['review_reason'] or 'unspecified' }}</div>
+      {% set signals = r['review_signals'] | review_signals_list %}
+      {% if signals %}<div class="review-item-signals">Signals: {{ signals | join(', ') }}</div>{% endif %}
+      <div class="review-item-links">
+        {% if r['source_url'] %}<a href="{{ r['source_url'] }}" target="_blank" rel="noopener">source</a>{% endif %}
+        {% if r['registration_url'] %}<a href="{{ r['registration_url'] }}" target="_blank" rel="noopener">registration</a>{% endif %}
+      </div>
+      <div class="review-item-actions">
+        <form method="post" action="{{ url_for('accept_review_route', review_id=r['id']) }}">
+          <button>Add Event</button>
+        </form>
+        <form method="post" action="{{ url_for('dismiss_review_route', review_id=r['id']) }}">
+          <button>Dismiss</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
 </body>
 </html>

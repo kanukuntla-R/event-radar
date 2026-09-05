@@ -4,6 +4,7 @@ real data/events.db. Stdlib unittest only.
 
 Run with: python -m unittest test_app -v
 """
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -65,6 +66,26 @@ def _insert_recovery_candidate(conn, event_id, candidate_url="https://mlh.io/eve
     return cur.lastrowid
 
 
+def _insert_review_candidate(conn, status="pending", **overrides):
+    fields = dict(
+        name="Maosho", event_type="asu", event_subtype="other",
+        description="An academic talk about a curious subject.",
+        start_date="2026-09-15", end_date="2026-09-15", start_time="17:00", end_time="18:00",
+        timezone="America/Phoenix", location="MU Alumni Lounge", location_type="in_person",
+        location_area="tempe", source="ASU Events", source_url="https://asuevents.asu.edu/event/maosho",
+        organizer="ASU Events", registration_status="unknown", registration_url=None,
+        application_deadline=None, review_reason="no clear include or exclude evidence",
+        review_signals=json.dumps(["supporting_category:academic events"]),
+        discovered_at="2026-09-05T00:00:00+00:00", status=status, resolved_at=None,
+    )
+    fields.update(overrides)
+    columns = ", ".join(fields.keys())
+    placeholders = ", ".join(f":{k}" for k in fields)
+    cur = conn.execute(f"INSERT INTO event_review_candidates ({columns}) VALUES ({placeholders})", fields)
+    conn.commit()
+    return cur.lastrowid
+
+
 class AppTestCase(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -88,6 +109,11 @@ class AppTestCase(unittest.TestCase):
     def _recovery_candidate(self, candidate_id):
         return self.conn.execute(
             "SELECT * FROM source_recovery_candidates WHERE id = ?", (candidate_id,)
+        ).fetchone()
+
+    def _review_candidate(self, review_id):
+        return self.conn.execute(
+            "SELECT * FROM event_review_candidates WHERE id = ?", (review_id,)
         ).fetchone()
 
 
@@ -475,6 +501,99 @@ class CalendarLifecycleRegressionTests(AppTestCase):
         ics = self.client.get("/calendar.ics").data.decode()
         self.assertIn("SUMMARY:Local Hack Day", ics)
         self.assertIn("DTSTART;VALUE=DATE:", ics)
+
+
+class ReviewQueueDashboardTests(AppTestCase):
+    def test_pending_review_candidates_visible(self):
+        _insert_review_candidate(self.conn, name="Maosho")
+        html = self.client.get("/").data.decode()
+        self.assertIn("Events to Review", html)
+        self.assertIn("Maosho", html)
+
+    def test_accepted_review_candidate_hidden(self):
+        _insert_review_candidate(self.conn, name="Maosho", status="accepted")
+        html = self.client.get("/").data.decode()
+        self.assertNotIn("Events to Review", html)
+
+    def test_dismissed_review_candidate_hidden(self):
+        _insert_review_candidate(self.conn, name="Maosho", status="dismissed")
+        html = self.client.get("/").data.decode()
+        self.assertNotIn("Events to Review", html)
+
+    def test_reason_and_signals_visible(self):
+        _insert_review_candidate(
+            self.conn, review_reason="no clear include or exclude evidence",
+            review_signals=json.dumps(["supporting_category:science"]),
+        )
+        html = self.client.get("/").data.decode()
+        self.assertIn("no clear include or exclude evidence", html)
+        self.assertIn("supporting_category:science", html)
+
+    def test_source_link_visible(self):
+        _insert_review_candidate(self.conn, source_url="https://asuevents.asu.edu/event/maosho")
+        html = self.client.get("/").data.decode()
+        self.assertIn("https://asuevents.asu.edu/event/maosho", html)
+
+
+class ReviewRouteTests(AppTestCase):
+    def test_add_event_post_works(self):
+        review_id = _insert_review_candidate(self.conn, name="Maosho")
+        resp = self.client.post(f"/review/{review_id}/accept")
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(self._review_candidate(review_id)["status"], "accepted")
+        row = self.conn.execute("SELECT * FROM events WHERE name = 'Maosho'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "new")
+        self.assertEqual(row["event_state"], "active")
+
+    def test_dismiss_post_works(self):
+        review_id = _insert_review_candidate(self.conn, name="Maosho")
+        resp = self.client.post(f"/review/{review_id}/dismiss")
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(self._review_candidate(review_id)["status"], "dismissed")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
+
+    def test_nonexistent_review_id_does_not_crash(self):
+        resp = self.client.post("/review/99999/accept")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_already_resolved_review_does_not_crash(self):
+        review_id = _insert_review_candidate(self.conn, status="accepted")
+        resp = self.client.post(f"/review/{review_id}/accept")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_get_accept_is_not_allowed(self):
+        review_id = _insert_review_candidate(self.conn)
+        resp = self.client.get(f"/review/{review_id}/accept")
+        self.assertEqual(resp.status_code, 405)
+        self.assertEqual(self._review_candidate(review_id)["status"], "pending")
+
+    def test_get_dismiss_is_not_allowed(self):
+        review_id = _insert_review_candidate(self.conn)
+        resp = self.client.get(f"/review/{review_id}/dismiss")
+        self.assertEqual(resp.status_code, 405)
+        self.assertEqual(self._review_candidate(review_id)["status"], "pending")
+
+
+class ReviewCalendarRegressionTests(AppTestCase):
+    def test_pending_review_candidate_absent_from_ics(self):
+        _insert_review_candidate(self.conn, name="Maosho")
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertNotIn("Maosho", ics)
+
+    def test_newly_accepted_status_new_event_absent_from_ics(self):
+        review_id = _insert_review_candidate(self.conn, name="Maosho")
+        self.client.post(f"/review/{review_id}/accept")
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertNotIn("Maosho", ics)
+
+    def test_only_interested_active_event_appears_after_manual_interested(self):
+        review_id = _insert_review_candidate(self.conn, name="Maosho")
+        self.client.post(f"/review/{review_id}/accept")
+        row = self.conn.execute("SELECT id FROM events WHERE name = 'Maosho'").fetchone()
+        self.client.post(f"/event/{row['id']}/interested")
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertIn("SUMMARY:Maosho", ics)
 
 
 if __name__ == "__main__":
