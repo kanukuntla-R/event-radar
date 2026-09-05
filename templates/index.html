@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Event Radar</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Event Radar</h1>
+    <a class="ics-link" href="{{ url_for('calendar_ics') }}">Subscribe to Interested events (.ics)</a>
+  </header>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Type</th>
+        <th>Date</th>
+        <th>Location</th>
+        <th>Status</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in events %}
+      <tr class="status-{{ e['status'] }}">
+        <td>
+          <strong>{{ e['name'] }}</strong>
+          {% if e['source_url'] %}<a href="{{ e['source_url'] }}" target="_blank" rel="noopener">source</a>{% endif %}
+          {% if e['description'] %}<div class="desc">{{ e['description'] }}</div>{% endif %}
+        </td>
+        <td>{{ e['event_type'] or '' }}</td>
+        <td>{{ e | event_date }}</td>
+        <td>
+          {{ e['location'] or '' }}
+          {% if e['location_type'] %}<span class="loc-type">({{ e['location_type'] }})</span>{% endif %}
+        </td>
+        <td><span class="badge badge-{{ e['status'] }}">{{ e['status'] }}</span></td>
+        <td class="actions">
+          <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='interested') }}">
+            <button {% if e['status'] == 'interested' %}disabled{% endif %}>Interested</button>
+          </form>
+          <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='watching') }}">
+            <button {% if e['status'] == 'watching' %}disabled{% endif %}>Watching</button>
+          </form>
+          <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='ignore') }}">
+            <button {% if e['status'] == 'ignored' %}disabled{% endif %}>Ignore</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>
