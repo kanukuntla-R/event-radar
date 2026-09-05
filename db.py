@@ -22,6 +22,11 @@ NEW_COLUMNS = {
     "application_deadline": "TEXT",
     "last_checked": "TEXT",
     "travel_required": "INTEGER",
+    "event_state": "TEXT NOT NULL DEFAULT 'active' CHECK (event_state IN ('active', 'inactive'))",
+    "inactive_reason": "TEXT",
+    "last_check_status": "TEXT",
+    "consecutive_failures": "INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0)",
+    "last_successful_check": "TEXT",
 }
 
 
