@@ -6,6 +6,7 @@ from db import get_db, init_db
 from calendar_service import generate_ics
 from proposal_resolver import accept_proposal, dismiss_proposal, StaleProposalError
 from source_health import classify_source_health
+from source_recovery_resolver import accept_recovery_candidate, dismiss_recovery_candidate
 
 app = Flask(__name__)
 
@@ -24,6 +25,15 @@ FIELD_LABELS = {
     "registration_status": "Registration status",
     "registration_url": "Registration URL",
     "application_deadline": "Application deadline",
+}
+
+CANDIDATE_TYPE_LABELS = {
+    "official_event": "official event",
+    "official_organizer": "official organizer",
+    "official_university": "official university",
+    "mlh": "MLH",
+    "official_social": "official social",
+    "other": "other",
 }
 
 init_db()
@@ -45,6 +55,11 @@ def format_proposal_value(value):
 @app.template_filter("source_health")
 def source_health_filter(e):
     return classify_source_health(e)
+
+
+@app.template_filter("candidate_type_label")
+def candidate_type_label(candidate_type):
+    return CANDIDATE_TYPE_LABELS.get(candidate_type, candidate_type)
 
 
 def _fmt_date(d):
@@ -96,13 +111,26 @@ def _load_pending_proposals(conn):
     return by_event
 
 
+def _load_pending_recovery_candidates(conn):
+    rows = conn.execute(
+        "SELECT * FROM source_recovery_candidates WHERE status = 'pending' "
+        "ORDER BY discovered_at, id"
+    ).fetchall()
+    by_event = {}
+    for row in rows:
+        by_event.setdefault(row["event_id"], []).append(row)
+    return by_event
+
+
 def _render_dashboard(error=None):
     conn = get_db()
     events = _load_dashboard_events(conn)
     proposals_by_event = _load_pending_proposals(conn)
+    recovery_by_event = _load_pending_recovery_candidates(conn)
     conn.close()
     return render_template(
-        "index.html", events=events, proposals_by_event=proposals_by_event, error=error
+        "index.html", events=events, proposals_by_event=proposals_by_event,
+        recovery_by_event=recovery_by_event, error=error,
     )
 
 
@@ -177,6 +205,30 @@ def dismiss_proposal_route(proposal_id):
     except (LookupError, ValueError) as e:
         conn.close()
         return _render_dashboard(error=f"Could not dismiss proposal {proposal_id}: {e}")
+    conn.close()
+    return redirect(url_for("index"))
+
+
+@app.route("/source-recovery/<int:candidate_id>/accept", methods=["POST"])
+def accept_recovery_candidate_route(candidate_id):
+    conn = get_db()
+    try:
+        accept_recovery_candidate(conn, candidate_id)
+    except (LookupError, ValueError) as e:
+        conn.close()
+        return _render_dashboard(error=f"Could not use candidate source {candidate_id}: {e}")
+    conn.close()
+    return redirect(url_for("index"))
+
+
+@app.route("/source-recovery/<int:candidate_id>/dismiss", methods=["POST"])
+def dismiss_recovery_candidate_route(candidate_id):
+    conn = get_db()
+    try:
+        dismiss_recovery_candidate(conn, candidate_id)
+    except (LookupError, ValueError) as e:
+        conn.close()
+        return _render_dashboard(error=f"Could not dismiss candidate source {candidate_id}: {e}")
     conn.close()
     return redirect(url_for("index"))
 

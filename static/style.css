@@ -194,3 +194,52 @@ tr.event-inactive {
   padding: 0.3rem 0.6rem;
   font-size: 0.85rem;
 }
+
+tr.recovery-row td {
+  background: #eff6ff;
+  border-bottom: 1px solid #eee;
+}
+
+.recovery-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+  margin-bottom: 0.4rem;
+}
+
+.recovery-candidate {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+  padding: 0.25rem 0;
+}
+
+.recovery-type {
+  font-weight: 600;
+  min-width: 12rem;
+  text-transform: capitalize;
+}
+
+.recovery-url a {
+  color: #2563eb;
+}
+
+.recovery-evidence {
+  color: #888;
+}
+
+.recovery-actions {
+  display: flex;
+  gap: 0.3rem;
+  margin-left: auto;
+}
+
+.recovery-actions button {
+  cursor: pointer;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+}

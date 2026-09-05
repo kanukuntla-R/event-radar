@@ -110,6 +110,31 @@
         </td>
       </tr>
       {% endif %}
+      {% set candidates = recovery_by_event.get(e['id']) %}
+      {% if candidates %}
+      <tr class="recovery-row">
+        <td colspan="7">
+          <div class="recovery">
+            <div class="recovery-title">Possible replacement source</div>
+            {% for c in candidates %}
+            <div class="recovery-candidate">
+              <div class="recovery-type">{{ c['candidate_type'] | candidate_type_label }} &mdash; {{ c['confidence'] }} confidence</div>
+              <div class="recovery-url"><a href="{{ c['candidate_url'] }}" target="_blank" rel="noopener">{{ c['candidate_url'] }}</a></div>
+              {% if c['evidence'] %}<div class="recovery-evidence">Evidence: {{ c['evidence'] }}</div>{% endif %}
+              <div class="recovery-actions">
+                <form method="post" action="{{ url_for('accept_recovery_candidate_route', candidate_id=c['id']) }}">
+                  <button>Use this source</button>
+                </form>
+                <form method="post" action="{{ url_for('dismiss_recovery_candidate_route', candidate_id=c['id']) }}">
+                  <button>Dismiss</button>
+                </form>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </td>
+      </tr>
+      {% endif %}
       {% endfor %}
     </tbody>
   </table>

@@ -49,6 +49,22 @@ def _insert_proposal(conn, event_id, field, old_value, new_value, status="pendin
     return cur.lastrowid
 
 
+def _insert_recovery_candidate(conn, event_id, candidate_url="https://mlh.io/events/test", status="pending", **overrides):
+    fields = dict(
+        event_id=event_id, candidate_url=candidate_url, candidate_type="mlh",
+        title="Test Hack - MLH", evidence="Linked from source page", confidence="medium",
+        discovered_at="2026-09-05T00:00:00+00:00", status=status, resolved_at=None,
+    )
+    fields.update(overrides)
+    columns = ", ".join(fields.keys())
+    placeholders = ", ".join(f":{k}" for k in fields)
+    cur = conn.execute(
+        f"INSERT INTO source_recovery_candidates ({columns}) VALUES ({placeholders})", fields
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
 class AppTestCase(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -68,6 +84,11 @@ class AppTestCase(unittest.TestCase):
 
     def _event(self, event_id):
         return self.conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+
+    def _recovery_candidate(self, candidate_id):
+        return self.conn.execute(
+            "SELECT * FROM source_recovery_candidates WHERE id = ?", (candidate_id,)
+        ).fetchone()
 
 
 class DashboardRenderingTests(AppTestCase):
@@ -306,6 +327,68 @@ class ReactivateRouteTests(AppTestCase):
         resp = self.client.get(f"/event/{event_id}/reactivate")
         self.assertEqual(resp.status_code, 405)
         self.assertEqual(self._event(event_id)["event_state"], "inactive")
+
+
+class SourceRecoveryDashboardTests(AppTestCase):
+    def test_pending_candidate_renders(self):
+        event_id = _insert_event(self.conn, name="Flaky Hack", consecutive_failures=3)
+        _insert_recovery_candidate(self.conn, event_id)
+        html = self.client.get("/").data.decode()
+        self.assertIn("Possible replacement source", html)
+        self.assertIn("MLH", html)
+        self.assertIn("https://mlh.io/events/test", html)
+
+    def test_accepted_candidate_hidden(self):
+        event_id = _insert_event(self.conn, consecutive_failures=3)
+        _insert_recovery_candidate(self.conn, event_id, status="accepted")
+        html = self.client.get("/").data.decode()
+        self.assertNotIn("Possible replacement source", html)
+
+    def test_dismissed_candidate_hidden(self):
+        event_id = _insert_event(self.conn, consecutive_failures=3)
+        _insert_recovery_candidate(self.conn, event_id, status="dismissed")
+        html = self.client.get("/").data.decode()
+        self.assertNotIn("Possible replacement source", html)
+
+
+class SourceRecoveryRouteTests(AppTestCase):
+    def test_accept_post_updates_source_url(self):
+        event_id = _insert_event(self.conn, source_url="https://old.example.com", consecutive_failures=3)
+        cid = _insert_recovery_candidate(self.conn, event_id, candidate_url="https://mlh.io/events/new")
+        resp = self.client.post(f"/source-recovery/{cid}/accept")
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(self._event(event_id)["source_url"], "https://mlh.io/events/new")
+        self.assertEqual(self._recovery_candidate(cid)["status"], "accepted")
+
+    def test_dismiss_post_leaves_source_url_unchanged(self):
+        event_id = _insert_event(self.conn, source_url="https://old.example.com", consecutive_failures=3)
+        cid = _insert_recovery_candidate(self.conn, event_id, candidate_url="https://mlh.io/events/new")
+        resp = self.client.post(f"/source-recovery/{cid}/dismiss")
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(self._event(event_id)["source_url"], "https://old.example.com")
+        self.assertEqual(self._recovery_candidate(cid)["status"], "dismissed")
+
+    def test_nonexistent_candidate_does_not_crash(self):
+        resp = self.client.post("/source-recovery/99999/accept")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_already_resolved_candidate_does_not_crash(self):
+        event_id = _insert_event(self.conn, consecutive_failures=3)
+        cid = _insert_recovery_candidate(self.conn, event_id, status="accepted")
+        resp = self.client.post(f"/source-recovery/{cid}/accept")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_get_accept_is_not_allowed(self):
+        event_id = _insert_event(self.conn, consecutive_failures=3)
+        cid = _insert_recovery_candidate(self.conn, event_id)
+        resp = self.client.get(f"/source-recovery/{cid}/accept")
+        self.assertEqual(resp.status_code, 405)
+
+    def test_get_dismiss_is_not_allowed(self):
+        event_id = _insert_event(self.conn, consecutive_failures=3)
+        cid = _insert_recovery_candidate(self.conn, event_id)
+        resp = self.client.get(f"/source-recovery/{cid}/dismiss")
+        self.assertEqual(resp.status_code, 405)
 
 
 if __name__ == "__main__":

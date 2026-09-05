@@ -62,3 +62,24 @@ CREATE TABLE IF NOT EXISTS event_change_proposals (
     resolved_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Candidate replacement source URLs discovered for hackathons with unhealthy
+-- sources (consecutive_failures >= 3). Purely advisory - nothing writes
+-- events.source_url automatically; only source_recovery_resolver's explicit
+-- accept action does that, on human review of a pending row here.
+CREATE TABLE IF NOT EXISTS source_recovery_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL REFERENCES events(id),
+    candidate_url TEXT NOT NULL,
+    candidate_type TEXT NOT NULL CHECK (candidate_type IN (
+        'official_event', 'official_organizer', 'official_university',
+        'mlh', 'official_social', 'other'
+    )),
+    title TEXT,
+    evidence TEXT,
+    confidence TEXT NOT NULL CHECK (confidence IN ('high', 'medium', 'low')),
+    discovered_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'dismissed')),
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
