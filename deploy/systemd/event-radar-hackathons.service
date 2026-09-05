@@ -1,0 +1,13 @@
+[Unit]
+Description=Event Radar - hackathon source health checks (run_hackathon_checks.py)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/kanukuntla-r/workspace/event-radar
+# All four maintenance services share ONE flock (%t = user runtime dir,
+# i.e. $XDG_RUNTIME_DIR - not git-tracked, cleared each boot) so two
+# scheduled writers never touch data/events.db at the same time. -n means
+# a job that can't get the lock exits immediately (code 1) rather than
+# waiting - see deploy/systemd/README.md for why that's treated as a
+# normal (if rare) failed run, not silently swallowed.
+ExecStart=/usr/bin/flock -n %t/event-radar-maintenance.lock /home/kanukuntla-r/workspace/event-radar/.venv/bin/python /home/kanukuntla-r/workspace/event-radar/run_hackathon_checks.py

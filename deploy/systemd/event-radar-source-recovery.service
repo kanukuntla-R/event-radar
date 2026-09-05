@@ -1,0 +1,9 @@
+[Unit]
+Description=Event Radar - hackathon source recovery discovery (run_source_recovery.py)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/kanukuntla-r/workspace/event-radar
+# See event-radar-hackathons.service for why this shares one flock with
+# the other three maintenance services.
+ExecStart=/usr/bin/flock -n %t/event-radar-maintenance.lock /home/kanukuntla-r/workspace/event-radar/.venv/bin/python /home/kanukuntla-r/workspace/event-radar/run_source_recovery.py

@@ -1,0 +1,11 @@
+[Unit]
+Description=Event Radar - hackathon source health checks, once daily
+
+[Timer]
+OnCalendar=07:00
+Persistent=true
+RandomizedDelaySec=600
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

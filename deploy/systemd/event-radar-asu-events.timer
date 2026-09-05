@@ -1,0 +1,16 @@
+[Unit]
+Description=Event Radar - ASU Events discovery, every 6 hours
+
+[Timer]
+# 30 min after the ASU Career Services timer's offset - see
+# deploy/systemd/README.md for why the two ASU collectors are staggered.
+OnCalendar=*-*-* 00:45:00
+OnCalendar=*-*-* 06:45:00
+OnCalendar=*-*-* 12:45:00
+OnCalendar=*-*-* 18:45:00
+Persistent=true
+RandomizedDelaySec=600
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Event Radar - hackathon source recovery discovery, once daily
+
+[Timer]
+# Scheduled after the daily hackathon check (07:00) so a hackathon's
+# consecutive_failures count from today's check is already up to date
+# before recovery decides which events are eligible (>=3 failures).
+OnCalendar=07:30
+Persistent=true
+RandomizedDelaySec=600
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
