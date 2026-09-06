@@ -3,11 +3,14 @@ per-user event status, and calendar tokens. events stays shared - these
 helpers never read or write events.status, which remains legacy
 single-user state until the app fully switches over (see db.py).
 """
+import hashlib
 import secrets
 import sqlite3
 from datetime import datetime, timezone
 
 from werkzeug.security import generate_password_hash, check_password_hash
+
+CALENDAR_TOKEN_PREFIX_LENGTH = 8
 
 BOOTSTRAP_OWNER_EMAIL = "owner@event-radar.local"
 BOOTSTRAP_OWNER_DISPLAY_NAME = "Owner"
@@ -151,26 +154,108 @@ def set_user_event_status(conn, user_id, event_id, status):
     conn.commit()
 
 
-def create_calendar_token(conn, user_id, max_attempts=5):
-    """Creates a cryptographically random, unique, opaque calendar token
-    for a user. Retries on the astronomically unlikely chance of a
-    collision (secrets.token_urlsafe(32) is 256 bits of randomness) -
-    but only for that specific collision, never for an unrelated
-    integrity error, and never for a nonexistent user (checked once,
-    up front, with no retry)."""
-    if not _user_exists(conn, user_id):
-        raise ValueError(f"No such user: {user_id!r}")
+def hash_calendar_token(raw_token):
+    """SHA-256 lookup hash for a calendar bearer token. Not password
+    hashing - a calendar token already carries 256 bits of entropy
+    (secrets.token_urlsafe(32)), so a fast, deterministic hash is the
+    right tool for exact-match lookup; werkzeug's slow password hashing
+    would be pointless overhead here and isn't designed for lookup at all
+    (its salt makes lookup-by-hash impossible in the first place)."""
+    return hashlib.sha256(raw_token.encode()).hexdigest()
+
+
+def get_active_calendar_token_for_user(conn, user_id):
+    return conn.execute(
+        "SELECT * FROM calendar_tokens WHERE user_id = ? AND revoked_at IS NULL",
+        (user_id,),
+    ).fetchone()
+
+
+def get_user_for_calendar_token(conn, raw_token):
+    """Resolves the owning user for a raw bearer token. Returns None for
+    every failure case alike - nonexistent, revoked, or empty/malformed -
+    callers must never distinguish these in a response (see app.py's
+    private ICS route: always a generic 404)."""
+    if not raw_token:
+        return None
+    return conn.execute(
+        "SELECT u.* FROM calendar_tokens ct JOIN users u ON u.id = ct.user_id "
+        "WHERE ct.token_hash = ? AND ct.revoked_at IS NULL",
+        (hash_calendar_token(raw_token),),
+    ).fetchone()
+
+
+def _generate_and_insert_token(conn, user_id, max_attempts=5):
+    """Inserts a new token row - does NOT commit, caller owns the
+    transaction (this matters for rotate_calendar_token, which must
+    revoke-then-insert as one atomic unit). Retries only on a genuine
+    token_hash collision (astronomically unlikely - 256 bits of
+    randomness); any other IntegrityError (e.g. the active-per-user
+    partial index, on a genuine concurrent double-create) propagates
+    immediately instead of being silently retried."""
     for _ in range(max_attempts):
-        token = secrets.token_urlsafe(32)
+        raw_token = secrets.token_urlsafe(32)
         try:
             conn.execute(
-                "INSERT INTO calendar_tokens (user_id, token, created_at) VALUES (?, ?, ?)",
-                (user_id, token, _now()),
+                "INSERT INTO calendar_tokens (user_id, token_hash, token_prefix, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (user_id, hash_calendar_token(raw_token), raw_token[:CALENDAR_TOKEN_PREFIX_LENGTH], _now()),
             )
-            conn.commit()
-            return token
+            return raw_token
         except sqlite3.IntegrityError as e:
-            if "calendar_tokens.token" not in str(e):
+            if "calendar_tokens.token_hash" not in str(e):
                 raise
-            conn.rollback()
+            # A fresh INSERT that failed before any commit needs no
+            # rollback - just try a new random token.
     raise RuntimeError("Could not generate a unique calendar token")
+
+
+def create_calendar_token(conn, user_id):
+    """Creates a user's first/only active calendar token. Raises
+    ValueError if the user doesn't exist or already has an active token
+    (use rotate_calendar_token to replace one). Returns the RAW token -
+    this is the only time it is ever available; only its hash is stored."""
+    if not _user_exists(conn, user_id):
+        raise ValueError(f"No such user: {user_id!r}")
+    if get_active_calendar_token_for_user(conn, user_id) is not None:
+        raise ValueError(f"User {user_id!r} already has an active calendar token")
+    try:
+        raw_token = _generate_and_insert_token(conn, user_id)
+    except Exception:
+        conn.rollback()
+        raise
+    conn.commit()
+    return raw_token
+
+
+def rotate_calendar_token(conn, user_id):
+    """Atomically revokes the user's current active token (if any) and
+    creates a new one - one commit covers both, so a failure partway
+    through can never leave the user with zero active tokens. Returns
+    the new RAW token."""
+    if not _user_exists(conn, user_id):
+        raise ValueError(f"No such user: {user_id!r}")
+    try:
+        conn.execute(
+            "UPDATE calendar_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+            (_now(), user_id),
+        )
+        raw_token = _generate_and_insert_token(conn, user_id)
+    except Exception:
+        conn.rollback()
+        raise
+    conn.commit()
+    return raw_token
+
+
+def revoke_calendar_token(conn, user_id):
+    """Revokes the user's active token, if any. Idempotent - returns
+    False (no-op) when there is no active token to revoke."""
+    if not _user_exists(conn, user_id):
+        raise ValueError(f"No such user: {user_id!r}")
+    cur = conn.execute(
+        "UPDATE calendar_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+        (_now(), user_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0

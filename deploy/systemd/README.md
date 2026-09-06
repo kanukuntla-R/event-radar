@@ -86,7 +86,7 @@ silently swallow a skip and have the DB simply not get checked that cycle.
 
 ## The web dashboard (`event-radar-web.service`)
 
-Runs `gunicorn --bind 0.0.0.0:5000 --workers 1 --worker-class gthread --threads 2 --access-logfile - app:app`
+Runs `gunicorn --bind 0.0.0.0:5000 --workers 1 --worker-class gthread --threads 2 --access-logfile - --access-logformat '%(h)s %(t)s %(m)s %(s)s %(B)s %(D)s %(a)s' app:app`
 from the repo directory. Unlike the maintenance units, this is `Type=simple`
 (a long-running foreground process, not a one-shot) with `Restart=on-failure`
 and `RestartSec=5`, and it has no timer - it's meant to just always be up.
@@ -294,8 +294,39 @@ systemctl --user disable --now event-radar-web.service
 ```
 
 Gunicorn is given `--access-logfile -`, so per-request access lines are
-written to stdout, which journald already captures. To see who hit which
-route:
+written to stdout, which journald already captures.
+
+**V0.10D access-log atom audit**: the default `--access-logformat` (used
+before V0.10D) includes `%(r)s` (the full request line: method + path +
+query string + protocol), which would have written a private calendar
+token straight into journald the moment anyone fetched their subscription
+URL. The configured format is deliberately narrowed to:
+
+```
+%(h)s %(t)s %(m)s %(s)s %(B)s %(D)s %(a)s
+```
+
+| Atom | Meaning | Included? |
+|------|---------|-----------|
+| `%(h)s` | remote address | yes |
+| `%(t)s` | timestamp | yes |
+| `%(m)s` | request method | yes |
+| `%(s)s` | status code | yes |
+| `%(B)s` | response size (bytes) | yes |
+| `%(D)s` | request duration (microseconds) | yes |
+| `%(a)s` | user agent | yes |
+| `%(r)s` | full request line (method+path+query+protocol) | **excluded - contains the token** |
+| `%(U)s` | URL path only | **excluded - contains the token** |
+| `%(q)s` | query string | **excluded** |
+| `%(f)s` | Referer header | **excluded - could itself carry a sensitive URL** |
+
+`test_gunicorn_access_log.py` proves this by parsing this exact
+`--access-logformat` value out of this file, running an isolated local
+Gunicorn instance against a throwaway Flask app, requesting a path
+containing a clearly synthetic fake token, and asserting that string is
+absent from the captured access log.
+
+To see who hit which route (method/status/timing only, no path):
 
 ```bash
 journalctl --user -u event-radar-web.service

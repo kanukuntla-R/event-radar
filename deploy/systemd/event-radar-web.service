@@ -18,7 +18,13 @@ EnvironmentFile=%h/.config/event-radar/secret.env
 # why this is the safest choice that doesn't change the existing Apple
 # Calendar subscription URL or risk a Tailscale-interface-not-up-yet
 # startup race.
-ExecStart=/home/kanukuntla-r/workspace/event-radar/.venv/bin/gunicorn --bind 0.0.0.0:5000 --workers 1 --worker-class gthread --threads 2 --access-logfile - app:app
+# V0.10D: --access-logformat deliberately excludes every atom that could
+# contain the request path/query string (%(r)s request line, %(U)s path,
+# %(q)s query string) or Referer (%(f)s) - private calendar token URLs
+# must never reach journald. See deploy/systemd/README.md for the atom
+# audit. Keeps: remote addr, timestamp, method, status, response bytes,
+# request duration, user agent.
+ExecStart=/home/kanukuntla-r/workspace/event-radar/.venv/bin/gunicorn --bind 0.0.0.0:5000 --workers 1 --worker-class gthread --threads 2 --access-logfile - --access-logformat '%(h)s %(t)s %(m)s %(s)s %(B)s %(D)s %(a)s' app:app
 Restart=on-failure
 RestartSec=5
 

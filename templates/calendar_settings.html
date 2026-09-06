@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Event Radar - Calendar</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Event Radar</h1>
+    <a href="{{ url_for('index') }}">Back to dashboard</a>
+  </header>
+
+  <main class="calendar-settings">
+    <h2>Private calendar subscription</h2>
+
+    {% if error %}<div class="proposal-error">{{ error }}</div>{% endif %}
+
+    {% if new_token_url %}
+    <div class="token-reveal">
+      <p><strong>
+        {% if rotated %}Your calendar URL has been rotated.{% else %}Calendar subscription created.{% endif %}
+      </strong></p>
+      <p>Copy this URL into Apple Calendar's "Add Subscription Calendar" now - for security, it will not be shown again.</p>
+      <p class="token-url"><code id="token-url">{{ new_token_url }}</code></p>
+      <button type="button" id="copy-token-url">Copy URL</button>
+      {% if rotated %}<p>The previous subscription URL has stopped working - update Apple Calendar to this new one.</p>{% endif %}
+    </div>
+    <script>
+      document.getElementById('copy-token-url').addEventListener('click', function () {
+        navigator.clipboard.writeText(document.getElementById('token-url').textContent);
+      });
+    </script>
+    {% elif active_token %}
+    <p>Calendar subscription active (created {{ active_token['created_at'][:10] }}{% if active_token['token_prefix'] %}, id {{ active_token['token_prefix'] }}{% endif %}).</p>
+    <p>For security, the private URL cannot be displayed again. Rotate it if you need a new URL.</p>
+    <form method="post" action="{{ url_for('rotate_calendar_token_route') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit">Rotate URL</button>
+    </form>
+    <form method="post" action="{{ url_for('revoke_calendar_token_route') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit">Revoke</button>
+    </form>
+    {% else %}
+    <p>No active calendar subscription.</p>
+    <form method="post" action="{{ url_for('create_calendar_token_route') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit">Create calendar subscription</button>
+    </form>
+    {% endif %}
+  </main>
+</body>
+</html>

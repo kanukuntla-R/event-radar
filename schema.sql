@@ -169,15 +169,26 @@ CREATE TABLE IF NOT EXISTS user_event_status (
     PRIMARY KEY (user_id, event_id)
 );
 
--- Opaque per-user tokens for future private ICS subscription URLs.
--- No route exposes these yet (V0.10A is foundation only).
+-- V0.10D: private per-user ICS subscription tokens. The raw bearer token
+-- is NEVER stored - only a SHA-256 lookup hash (calendar tokens already
+-- carry 256 bits of entropy from secrets.token_urlsafe(32), so a fast
+-- lookup hash is appropriate here; this is not password storage, so
+-- werkzeug's slow password hashing would be the wrong tool). token_prefix
+-- is a short, deliberately non-secret slice of the raw token (safe to
+-- display for identification - the remaining ~200+ bits stay secret).
+-- The partial unique index enforces "one active token per user" at the
+-- DB level, not just in application code - see user_store.py.
 CREATE TABLE IF NOT EXISTS calendar_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id),
-    token TEXT NOT NULL UNIQUE,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_prefix TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     revoked_at TEXT
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_calendar_tokens_active_per_user
+    ON calendar_tokens (user_id) WHERE revoked_at IS NULL;
 
 -- V0.10B: generic one-time-migration marker, so a data migration (like the
 -- legacy events.status -> user_event_status backfill) can tell "already

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import db as db_module
 import seed as seed_module
+import user_store
 
 SCHEMA_PATH_TEXT = db_module.SCHEMA_PATH.read_text()
 
@@ -847,6 +848,184 @@ class EmailUniquenessMigrationTests(TempDbTestCase):
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         conn.close()
         self.assertEqual(count, 2)  # the seeded friend + bootstrap owner
+
+
+class _FailOnCalendarTokenMarkerConn:
+    """Wraps a real connection but fails the calendar-token-hash
+    migration's own marker INSERT - proves the table rebuild can't be
+    left half-done with a false completed marker."""
+
+    def __init__(self, real_conn):
+        self._real = real_conn
+
+    def execute(self, sql, params=()):
+        if "INSERT INTO app_migrations" in sql and db_module.CALENDAR_TOKENS_HASH_MIGRATION_NAME in params:
+            raise sqlite3.OperationalError("simulated failure")
+        return self._real.execute(sql, params)
+
+    def commit(self):
+        self._real.commit()
+
+    def rollback(self):
+        self._real.rollback()
+
+
+class CalendarTokenHashMigrationTests(TempDbTestCase):
+    """V0.10D: calendar_tokens moves from a raw plaintext token column to
+    a SHA-256 lookup hash + short non-secret prefix. Existing
+    subscriptions must keep working (the same raw token still resolves
+    after migration) and the plaintext must not survive."""
+
+    MARKER = db_module.CALENDAR_TOKENS_HASH_MIGRATION_NAME
+
+    def _seed_legacy_db(self, emails, tokens):
+        """tokens: list of (user_email, raw_token, revoked_at_or_None)."""
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(PRE_V0_10C_SCHEMA)
+        for email in emails:
+            conn.execute(
+                "INSERT INTO users (email, display_name, created_at, updated_at) "
+                "VALUES (?, ?, datetime('now'), datetime('now'))",
+                (email, email.split("@")[0]),
+            )
+        for user_email, raw_token, revoked_at in tokens:
+            user_id = conn.execute("SELECT id FROM users WHERE email = ?", (user_email,)).fetchone()[0]
+            conn.execute(
+                "INSERT INTO calendar_tokens (user_id, token, created_at, revoked_at) "
+                "VALUES (?, ?, datetime('now'), ?)",
+                (user_id, raw_token, revoked_at),
+            )
+        conn.commit()
+        conn.close()
+
+    def _cols(self, conn):
+        return {row["name"] for row in conn.execute("PRAGMA table_info(calendar_tokens)")}
+
+    def test_fresh_install_has_hashed_schema_and_zero_tokens(self):
+        db_module.init_db()
+        conn = db_module.get_db()
+        cols = self._cols(conn)
+        count = conn.execute("SELECT COUNT(*) FROM calendar_tokens").fetchone()[0]
+        marker = conn.execute("SELECT 1 FROM app_migrations WHERE name = ?", (self.MARKER,)).fetchone()
+        conn.close()
+        self.assertIn("token_hash", cols)
+        self.assertNotIn("token", cols)
+        self.assertEqual(count, 0)
+        self.assertIsNotNone(marker)
+
+    def test_legacy_db_with_zero_tokens_migrates_cleanly(self):
+        self._seed_legacy_db(["friend@example.com"], [])
+        db_module.init_db()  # must not raise
+        conn = db_module.get_db()
+        self.assertIn("token_hash", self._cols(conn))
+        conn.close()
+
+    def test_legacy_active_token_still_authenticates_after_migration(self):
+        self._seed_legacy_db(["friend@example.com"], [("friend@example.com", "legacy-raw-token-abc123", None)])
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        user = user_store.get_user_for_calendar_token(conn, "legacy-raw-token-abc123")
+        conn.close()
+        self.assertIsNotNone(user)
+        self.assertEqual(user["email"], "friend@example.com")
+
+    def test_plaintext_token_does_not_survive_migration(self):
+        self._seed_legacy_db(["friend@example.com"], [("friend@example.com", "legacy-raw-token-abc123", None)])
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        rows = conn.execute("SELECT * FROM calendar_tokens").fetchall()
+        conn.close()
+        for row in rows:
+            self.assertNotIn("legacy-raw-token-abc123", [str(v) for v in dict(row).values()])
+
+    def test_legacy_revoked_token_remains_revoked(self):
+        self._seed_legacy_db(
+            ["friend@example.com"],
+            [("friend@example.com", "legacy-revoked-token", "2026-01-01T00:00:00+00:00")],
+        )
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        user = user_store.get_user_for_calendar_token(conn, "legacy-revoked-token")
+        row = conn.execute("SELECT * FROM calendar_tokens").fetchone()
+        conn.close()
+        self.assertIsNone(user)
+        self.assertIsNotNone(row["revoked_at"])
+
+    def test_multiple_users_tokens_ownership_preserved(self):
+        self._seed_legacy_db(
+            ["alice@example.com", "bob@example.com"],
+            [("alice@example.com", "alice-raw-token", None), ("bob@example.com", "bob-raw-token", None)],
+        )
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        alice = user_store.get_user_for_calendar_token(conn, "alice-raw-token")
+        bob = user_store.get_user_for_calendar_token(conn, "bob-raw-token")
+        conn.close()
+        self.assertEqual(alice["email"], "alice@example.com")
+        self.assertEqual(bob["email"], "bob@example.com")
+
+    def test_ids_and_created_at_preserved(self):
+        self._seed_legacy_db(["friend@example.com"], [("friend@example.com", "legacy-raw-token-abc123", None)])
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        before = dict(conn.execute("SELECT id, user_id, created_at FROM calendar_tokens").fetchone())
+        conn.close()
+
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        after = dict(conn.execute("SELECT id, user_id, created_at FROM calendar_tokens").fetchone())
+        conn.close()
+        self.assertEqual(before, after)
+
+    def test_rerun_after_migration_makes_no_changes(self):
+        self._seed_legacy_db(["friend@example.com"], [("friend@example.com", "legacy-raw-token-abc123", None)])
+        db_module.init_db()
+        db_module.init_db()
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        user = user_store.get_user_for_calendar_token(conn, "legacy-raw-token-abc123")
+        count = conn.execute("SELECT COUNT(*) FROM calendar_tokens").fetchone()[0]
+        markers = conn.execute(
+            "SELECT COUNT(*) FROM app_migrations WHERE name = ?", (self.MARKER,)
+        ).fetchone()[0]
+        conn.close()
+        self.assertIsNotNone(user)
+        self.assertEqual(count, 1)
+        self.assertEqual(markers, 1)
+
+    def test_forced_failure_leaves_old_table_recoverable_and_no_false_marker(self):
+        self._seed_legacy_db(["friend@example.com"], [("friend@example.com", "legacy-raw-token-abc123", None)])
+        conn = db_module.get_db()
+        conn.executescript(SCHEMA_PATH_TEXT)
+        db_module._migrate(conn)
+        db_module._migrate_user_event_status(conn)
+        db_module._migrate_bootstrap_owner_admin(conn)
+        flaky = _FailOnCalendarTokenMarkerConn(conn)
+
+        with self.assertRaises(sqlite3.OperationalError):
+            db_module._migrate_calendar_tokens_hash(flaky)
+
+        marker = conn.execute("SELECT 1 FROM app_migrations WHERE name = ?", (self.MARKER,)).fetchone()
+        conn.close()
+        self.assertIsNone(marker)
+
+        # Retry (unwrapped, real connection) must succeed and recover the
+        # original subscription.
+        db_module.init_db()
+        conn = db_module.get_db()
+        user = user_store.get_user_for_calendar_token(conn, "legacy-raw-token-abc123")
+        markers = conn.execute(
+            "SELECT COUNT(*) FROM app_migrations WHERE name = ?", (self.MARKER,)
+        ).fetchone()[0]
+        conn.close()
+        self.assertIsNotNone(user)
+        self.assertEqual(markers, 1)
 
 
 class SeedLifecycleTests(TempDbTestCase):

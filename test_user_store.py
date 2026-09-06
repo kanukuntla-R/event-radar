@@ -12,8 +12,11 @@ from unittest.mock import patch
 from user_store import (
     BOOTSTRAP_OWNER_EMAIL, BOOTSTRAP_OWNER_DISPLAY_NAME,
     get_user_by_email, get_user_by_id, get_or_create_bootstrap_owner,
-    get_user_event_status, set_user_event_status, create_calendar_token,
+    get_user_event_status, set_user_event_status,
     normalize_email, create_user, set_user_password, verify_user_password,
+    hash_calendar_token, get_active_calendar_token_for_user,
+    get_user_for_calendar_token, create_calendar_token,
+    rotate_calendar_token, revoke_calendar_token,
 )
 
 SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text()
@@ -51,6 +54,9 @@ class _WrongIntegrityErrorConn:
 
     def commit(self):
         self._real.commit()
+
+    def rollback(self):
+        self._real.rollback()
 
     def rollback(self):
         self._real.rollback()
@@ -309,7 +315,18 @@ class UserEventStatusTests(unittest.TestCase):
         self.assertEqual(count, 0)
 
 
-class CalendarTokenTests(unittest.TestCase):
+class HashCalendarTokenTests(unittest.TestCase):
+    def test_deterministic_sha256_hex(self):
+        import hashlib
+        self.assertEqual(
+            hash_calendar_token("abc"), hashlib.sha256(b"abc").hexdigest()
+        )
+
+    def test_different_tokens_hash_differently(self):
+        self.assertNotEqual(hash_calendar_token("abc"), hash_calendar_token("abd"))
+
+
+class CreateCalendarTokenTests(unittest.TestCase):
     def setUp(self):
         self.conn = _make_conn()
         self.owner = get_or_create_bootstrap_owner(self.conn)
@@ -317,25 +334,37 @@ class CalendarTokenTests(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
 
-    def test_creates_token_row(self):
+    def test_creates_active_token_row(self):
         token = create_calendar_token(self.conn, self.owner["id"])
-        row = self.conn.execute("SELECT * FROM calendar_tokens WHERE token = ?", (token,)).fetchone()
+        row = get_active_calendar_token_for_user(self.conn, self.owner["id"])
         self.assertIsNotNone(row)
         self.assertEqual(row["user_id"], self.owner["id"])
         self.assertIsNone(row["revoked_at"])
+        self.assertEqual(row["token_hash"], hash_calendar_token(token))
 
-    def test_tokens_are_unique_across_calls(self):
-        t1 = create_calendar_token(self.conn, self.owner["id"])
-        t2 = create_calendar_token(self.conn, self.owner["id"])
-        self.assertNotEqual(t1, t2)
+    def test_raw_token_is_not_stored(self):
+        token = create_calendar_token(self.conn, self.owner["id"])
+        row = self.conn.execute("SELECT * FROM calendar_tokens WHERE user_id = ?", (self.owner["id"],)).fetchone()
+        stored_values = [str(v) for v in dict(row).values()]
+        self.assertNotIn(token, stored_values)
 
     def test_token_is_long_and_not_sequential(self):
         token = create_calendar_token(self.conn, self.owner["id"])
         self.assertGreaterEqual(len(token), 32)
         self.assertNotIn(token, ("1", "2", "token1", str(self.owner["id"])))
 
-    def test_retries_on_token_collision(self):
+    def test_tokens_unique_across_users(self):
+        friend = create_user(self.conn, "friend@example.com", "friend-pass")
+        self.conn.commit()
+        t1 = create_calendar_token(self.conn, self.owner["id"])
+        t2 = create_calendar_token(self.conn, friend["id"])
+        self.assertNotEqual(t1, t2)
+
+    def test_retries_only_on_genuine_hash_collision(self):
         existing_token = create_calendar_token(self.conn, self.owner["id"])
+        # revoke it first so the active-per-user index doesn't also object -
+        # this test isolates the hash-collision retry specifically.
+        revoke_calendar_token(self.conn, self.owner["id"])
         with patch("user_store.secrets.token_urlsafe", side_effect=[existing_token, "fresh-token-value"]):
             new_token = create_calendar_token(self.conn, self.owner["id"])
         self.assertEqual(new_token, "fresh-token-value")
@@ -354,12 +383,147 @@ class CalendarTokenTests(unittest.TestCase):
                 create_calendar_token(self.conn, bogus_user_id)
         mock_gen.assert_not_called()
 
+    def test_rejects_second_active_token_for_same_user(self):
+        create_calendar_token(self.conn, self.owner["id"])
+        with self.assertRaises(ValueError):
+            create_calendar_token(self.conn, self.owner["id"])
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM calendar_tokens WHERE user_id = ? AND revoked_at IS NULL",
+            (self.owner["id"],),
+        ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_can_create_again_after_revoking(self):
+        create_calendar_token(self.conn, self.owner["id"])
+        revoke_calendar_token(self.conn, self.owner["id"])
+        second = create_calendar_token(self.conn, self.owner["id"])
+        self.assertIsNotNone(get_user_for_calendar_token(self.conn, second))
+
     def test_unrelated_integrity_error_is_not_treated_as_collision(self):
         flaky = _WrongIntegrityErrorConn(self.conn)
         with self.assertRaises(sqlite3.IntegrityError):
             create_calendar_token(flaky, self.owner["id"])
         count = self.conn.execute("SELECT COUNT(*) FROM calendar_tokens").fetchone()[0]
         self.assertEqual(count, 0)
+
+
+class RotateCalendarTokenTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = _make_conn()
+        self.owner = get_or_create_bootstrap_owner(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_rotate_without_existing_token_creates_one(self):
+        new_token = rotate_calendar_token(self.conn, self.owner["id"])
+        self.assertIsNotNone(get_user_for_calendar_token(self.conn, new_token))
+
+    def test_old_token_stops_working_after_rotate(self):
+        old_token = create_calendar_token(self.conn, self.owner["id"])
+        rotate_calendar_token(self.conn, self.owner["id"])
+        self.assertIsNone(get_user_for_calendar_token(self.conn, old_token))
+
+    def test_new_token_works_after_rotate(self):
+        create_calendar_token(self.conn, self.owner["id"])
+        new_token = rotate_calendar_token(self.conn, self.owner["id"])
+        resolved = get_user_for_calendar_token(self.conn, new_token)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["id"], self.owner["id"])
+
+    def test_rotate_leaves_exactly_one_active_token(self):
+        create_calendar_token(self.conn, self.owner["id"])
+        rotate_calendar_token(self.conn, self.owner["id"])
+        rotate_calendar_token(self.conn, self.owner["id"])
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM calendar_tokens WHERE user_id = ? AND revoked_at IS NULL",
+            (self.owner["id"],),
+        ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_rotate_only_affects_own_token(self):
+        friend = create_user(self.conn, "friend@example.com", "friend-pass")
+        self.conn.commit()
+        friend_token = create_calendar_token(self.conn, friend["id"])
+        create_calendar_token(self.conn, self.owner["id"])
+
+        rotate_calendar_token(self.conn, self.owner["id"])
+
+        self.assertIsNotNone(get_user_for_calendar_token(self.conn, friend_token))
+
+    def test_rejects_nonexistent_user(self):
+        with self.assertRaises(ValueError):
+            rotate_calendar_token(self.conn, self.owner["id"] + 999)
+
+
+class RevokeCalendarTokenTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = _make_conn()
+        self.owner = get_or_create_bootstrap_owner(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_revokes_active_token(self):
+        token = create_calendar_token(self.conn, self.owner["id"])
+        revoked = revoke_calendar_token(self.conn, self.owner["id"])
+        self.assertTrue(revoked)
+        self.assertIsNone(get_user_for_calendar_token(self.conn, token))
+
+    def test_revoke_with_no_active_token_is_a_safe_no_op(self):
+        revoked = revoke_calendar_token(self.conn, self.owner["id"])
+        self.assertFalse(revoked)
+
+    def test_revoke_only_affects_own_token(self):
+        friend = create_user(self.conn, "friend@example.com", "friend-pass")
+        self.conn.commit()
+        friend_token = create_calendar_token(self.conn, friend["id"])
+        create_calendar_token(self.conn, self.owner["id"])
+
+        revoke_calendar_token(self.conn, self.owner["id"])
+
+        self.assertIsNotNone(get_user_for_calendar_token(self.conn, friend_token))
+
+    def test_can_create_new_token_after_revoke(self):
+        create_calendar_token(self.conn, self.owner["id"])
+        revoke_calendar_token(self.conn, self.owner["id"])
+        create_calendar_token(self.conn, self.owner["id"])  # must not raise
+
+    def test_rejects_nonexistent_user(self):
+        with self.assertRaises(ValueError):
+            revoke_calendar_token(self.conn, self.owner["id"] + 999)
+
+
+class GetUserForCalendarTokenTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = _make_conn()
+        self.owner = get_or_create_bootstrap_owner(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_valid_active_token_resolves_owner(self):
+        token = create_calendar_token(self.conn, self.owner["id"])
+        user = get_user_for_calendar_token(self.conn, token)
+        self.assertEqual(user["id"], self.owner["id"])
+
+    def test_random_token_returns_none(self):
+        create_calendar_token(self.conn, self.owner["id"])
+        self.assertIsNone(get_user_for_calendar_token(self.conn, "totally-random-guess"))
+
+    def test_revoked_token_returns_none(self):
+        token = create_calendar_token(self.conn, self.owner["id"])
+        revoke_calendar_token(self.conn, self.owner["id"])
+        self.assertIsNone(get_user_for_calendar_token(self.conn, token))
+
+    def test_empty_or_none_token_returns_none(self):
+        self.assertIsNone(get_user_for_calendar_token(self.conn, ""))
+        self.assertIsNone(get_user_for_calendar_token(self.conn, None))
+
+    def test_token_prefix_alone_does_not_authenticate(self):
+        token = create_calendar_token(self.conn, self.owner["id"])
+        prefix = token[:8]
+        self.assertIsNone(get_user_for_calendar_token(self.conn, prefix))
 
 
 if __name__ == "__main__":

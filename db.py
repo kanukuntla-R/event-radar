@@ -1,7 +1,10 @@
 import sqlite3
 from pathlib import Path
 
-from user_store import get_or_create_bootstrap_owner, BOOTSTRAP_OWNER_EMAIL
+from user_store import (
+    get_or_create_bootstrap_owner, BOOTSTRAP_OWNER_EMAIL,
+    hash_calendar_token, CALENDAR_TOKEN_PREFIX_LENGTH,
+)
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data" / "events.db"
@@ -130,6 +133,79 @@ def _migrate_bootstrap_owner_admin(conn):
         raise
 
 
+CALENDAR_TOKENS_HASH_MIGRATION_NAME = "v0_10d_calendar_tokens_hash"
+
+
+def _calendar_tokens_needs_hash_migration(conn):
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(calendar_tokens)")}
+    return "token" in cols and "token_hash" not in cols
+
+
+def _migrate_calendar_tokens_hash(conn):
+    """V0.10D: calendar_tokens used to store the raw bearer token in
+    plaintext. Rebuilds the table to store only a SHA-256 lookup hash
+    (plus a short non-secret prefix) - every existing subscription keeps
+    working, since a request's raw token is hashed before lookup, but the
+    plaintext itself is discarded. schema.sql's CREATE TABLE IF NOT
+    EXISTS never touches an existing (legacy-shaped) table, so this is
+    the only path that converts one. Guarded by its own marker;
+    transactional - the whole rebuild and the marker commit together or
+    neither does, so an interrupted run can't leave a half-rebuilt table
+    or a false "completed" marker."""
+    if _migration_applied(conn, CALENDAR_TOKENS_HASH_MIGRATION_NAME):
+        return
+    try:
+        # Unlike the other migrations here, this one issues DDL (DROP/
+        # CREATE TABLE). Python's sqlite3 module (legacy transaction
+        # control, the default) only auto-opens a transaction on DML -
+        # DDL runs in autocommit unless a transaction is already open, so
+        # without this explicit BEGIN, conn.rollback() below would NOT
+        # undo the table rebuild on a failure (verified empirically).
+        conn.execute("BEGIN")
+        if _calendar_tokens_needs_hash_migration(conn):
+            legacy_rows = conn.execute(
+                "SELECT id, user_id, token, created_at, revoked_at FROM calendar_tokens"
+            ).fetchall()
+            # schema.sql's executescript (already run before this function)
+            # may have already created the new partial index against this
+            # legacy-shaped table (it only references user_id/revoked_at,
+            # both present in the old shape too) - dropping the table
+            # drops that index along with it, so the CREATE below never
+            # collides on the index name.
+            conn.execute("DROP TABLE calendar_tokens")
+            conn.execute(
+                "CREATE TABLE calendar_tokens ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "user_id INTEGER NOT NULL REFERENCES users(id), "
+                "token_hash TEXT NOT NULL UNIQUE, "
+                "token_prefix TEXT, "
+                "created_at TEXT NOT NULL DEFAULT (datetime('now')), "
+                "revoked_at TEXT)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX idx_calendar_tokens_active_per_user "
+                "ON calendar_tokens (user_id) WHERE revoked_at IS NULL"
+            )
+            for row in legacy_rows:
+                conn.execute(
+                    "INSERT INTO calendar_tokens "
+                    "(id, user_id, token_hash, token_prefix, created_at, revoked_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        row["id"], row["user_id"], hash_calendar_token(row["token"]),
+                        row["token"][:CALENDAR_TOKEN_PREFIX_LENGTH], row["created_at"], row["revoked_at"],
+                    ),
+                )
+        conn.execute(
+            "INSERT INTO app_migrations (name, applied_at) VALUES (?, datetime('now'))",
+            (CALENDAR_TOKENS_HASH_MIGRATION_NAME,),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def init_db():
     DB_PATH.parent.mkdir(exist_ok=True)
     conn = get_db()
@@ -137,5 +213,6 @@ def init_db():
     _migrate(conn)
     _migrate_user_event_status(conn)
     _migrate_bootstrap_owner_admin(conn)
+    _migrate_calendar_tokens_hash(conn)
     conn.commit()
     conn.close()

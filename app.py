@@ -2,7 +2,7 @@ import json
 import os
 from datetime import datetime
 
-from flask import Flask, render_template, redirect, url_for, Response, abort, request, session, g
+from flask import Flask, render_template, redirect, url_for, Response, abort, request, session, g, make_response
 
 from db import get_db, init_db
 from calendar_service import generate_ics
@@ -10,7 +10,11 @@ from proposal_resolver import accept_proposal, dismiss_proposal, StaleProposalEr
 from source_health import classify_source_health
 from source_recovery_resolver import accept_recovery_candidate, dismiss_recovery_candidate
 from event_review_resolver import accept_review_candidate, dismiss_review_candidate
-from user_store import get_or_create_bootstrap_owner, set_user_event_status, verify_user_password
+from user_store import (
+    get_or_create_bootstrap_owner, set_user_event_status, verify_user_password,
+    get_active_calendar_token_for_user, create_calendar_token,
+    rotate_calendar_token, revoke_calendar_token, get_user_for_calendar_token,
+)
 from auth import (
     load_current_user, login_required, admin_required,
     generate_csrf_token, enforce_csrf, is_safe_next_url,
@@ -398,17 +402,137 @@ def dismiss_review_route(review_id):
     return redirect(url_for("index"))
 
 
+def _external_base_url():
+    """Base URL (scheme+host[:port], no trailing slash) for building a
+    private calendar subscription URL. Prefers EVENT_RADAR_EXTERNAL_BASE_URL
+    (for a future public/Cloudflare deployment behind a different
+    hostname) and otherwise falls back to the current request's own Host
+    header. Deliberately does NOT trust X-Forwarded-* headers (no
+    ProxyFix) - this deployment has no reverse proxy in front of Gunicorn
+    yet, and blindly trusting forwarded headers from arbitrary clients
+    would let a request spoof its own scheme/host."""
+    configured = os.environ.get("EVENT_RADAR_EXTERNAL_BASE_URL")
+    if configured:
+        return configured.rstrip("/")
+    return request.host_url.rstrip("/")
+
+
+def _calendar_subscription_url(raw_token):
+    return _external_base_url() + url_for("private_calendar_ics", token=raw_token)
+
+
+@app.route("/calendar")
+@login_required
+def calendar_settings():
+    conn = get_db()
+    active_token = get_active_calendar_token_for_user(conn, g.user["id"])
+    conn.close()
+    return render_template("calendar_settings.html", active_token=active_token, new_token_url=None, error=None)
+
+
+def _token_reveal_response(**template_args):
+    """create/rotate responses carry a one-time-viewable raw calendar token
+    URL - more sensitive than the ordinary settings page, so they always
+    get their own no-store/no-referrer headers regardless of what the
+    global response defaults are."""
+    resp = make_response(render_template("calendar_settings.html", **template_args))
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
+
+
+@app.route("/calendar/token/create", methods=["POST"])
+@login_required
+def create_calendar_token_route():
+    conn = get_db()
+    try:
+        raw_token = create_calendar_token(conn, g.user["id"])
+    except ValueError:
+        active_token = get_active_calendar_token_for_user(conn, g.user["id"])
+        conn.close()
+        return _token_reveal_response(
+            active_token=active_token, new_token_url=None,
+            error="A calendar subscription is already active.",
+        )
+    active_token = get_active_calendar_token_for_user(conn, g.user["id"])
+    conn.close()
+    return _token_reveal_response(
+        active_token=active_token,
+        new_token_url=_calendar_subscription_url(raw_token), rotated=False, error=None,
+    )
+
+
+@app.route("/calendar/token/rotate", methods=["POST"])
+@login_required
+def rotate_calendar_token_route():
+    conn = get_db()
+    raw_token = rotate_calendar_token(conn, g.user["id"])
+    active_token = get_active_calendar_token_for_user(conn, g.user["id"])
+    conn.close()
+    return _token_reveal_response(
+        active_token=active_token,
+        new_token_url=_calendar_subscription_url(raw_token), rotated=True, error=None,
+    )
+
+
+@app.route("/calendar/token/revoke", methods=["POST"])
+@login_required
+def revoke_calendar_token_route():
+    conn = get_db()
+    revoke_calendar_token(conn, g.user["id"])
+    conn.close()
+    return redirect(url_for("calendar_settings"))
+
+
+@app.route("/calendar/<token>.ics")
+def private_calendar_ics(token):
+    """V0.10D private per-user ICS feed, authenticated exclusively by the
+    bearer token in the URL - NOT by the browser session (g.user is never
+    read here). A logged-in browser session, or no session at all, must
+    never change whose feed is returned - only the token does. Any
+    failure (nonexistent, revoked, or malformed token) is the same
+    generic 404 - never distinguishing why, and never redirecting to
+    login."""
+    conn = get_db()
+    user = get_user_for_calendar_token(conn, token)
+    if user is None:
+        conn.close()
+        abort(404)
+    events = conn.execute(
+        "SELECT e.* FROM events e "
+        "JOIN user_event_status ues ON ues.event_id = e.id AND ues.user_id = ? "
+        "WHERE ues.status = 'interested' AND e.event_state = 'active' "
+        "ORDER BY e.start_date",
+        (user["id"],),
+    ).fetchall()
+    conn.close()
+    return Response(
+        generate_ics(events),
+        mimetype="text/calendar",
+        headers={
+            "Content-Disposition": "attachment; filename=event-radar.ics",
+            # Private per-user feed - never cache/store on a shared/intermediate cache.
+            "Cache-Control": "private, no-store",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
+
+
 @app.route("/calendar.ics")
 def calendar_ics():
-    """TEMPORARY LEGACY BEHAVIOR - REMOVE/REPLACE IN V0.10D.
+    """TEMPORARY LEGACY BEHAVIOR - REMOVE AFTER OWNER MIGRATES TO THE
+    TOKENIZED FEED (private_calendar_ics above). Kept working, unchanged,
+    because the human's real Apple Calendar is already subscribed to this
+    exact URL - breaking it before the new feed is reviewed and adopted
+    is not acceptable. Not advertised anywhere in the UI; the /calendar
+    settings page only ever offers tokenized URLs.
 
     Deliberately unauthenticated: Apple Calendar's ICS subscription
     fetcher cannot participate in the browser login session, so for this
     transition phase this feed keeps serving the bootstrap owner's own
     Interested + active events specifically - never "whichever browser
     user happens to be logged in" (there is no logged-in user for this
-    request at all). V0.10D replaces this with private per-user
-    calendar_tokens URLs and removes this unauthenticated route.
+    request at all).
 
     Reflects user_event_status, never the legacy events.status column. A
     plain JOIN (not LEFT JOIN) naturally excludes an event with no
