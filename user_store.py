@@ -32,7 +32,14 @@ def _event_exists(conn, event_id):
 def get_or_create_bootstrap_owner(conn):
     """Returns the single local bootstrap/owner user, creating it if this
     is a fresh or not-yet-migrated installation. Idempotent - looked up
-    by email, never inserted twice."""
+    by email, never inserted twice.
+
+    Does NOT commit - the caller owns the transaction. This matters for
+    db.py's migration, which needs owner creation to be part of the same
+    atomic commit as its status backfill and migration marker; a caller
+    that just wants the owner available immediately (e.g. a Flask route
+    reading/writing in the same request) should commit itself, same as
+    it already does for whatever it does next on this connection."""
     existing = get_user_by_email(conn, BOOTSTRAP_OWNER_EMAIL)
     if existing is not None:
         return existing
@@ -42,7 +49,6 @@ def get_or_create_bootstrap_owner(conn):
         "VALUES (?, ?, NULL, ?, ?)",
         (BOOTSTRAP_OWNER_EMAIL, BOOTSTRAP_OWNER_DISPLAY_NAME, now, now),
     )
-    conn.commit()
     return get_user_by_email(conn, BOOTSTRAP_OWNER_EMAIL)
 
 

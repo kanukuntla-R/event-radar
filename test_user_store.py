@@ -82,6 +82,13 @@ class BootstrapOwnerTests(unittest.TestCase):
     def test_get_user_by_email_returns_none_for_missing(self):
         self.assertIsNone(get_user_by_email(self.conn, "nobody@example.com"))
 
+    def test_does_not_commit_internally(self):
+        # Callers that need owner-creation to be part of a larger atomic
+        # transaction (db.py's migration) must be able to roll it back.
+        get_or_create_bootstrap_owner(self.conn)
+        self.conn.rollback()
+        self.assertIsNone(get_user_by_email(self.conn, BOOTSTRAP_OWNER_EMAIL))
+
 
 class UserEventStatusTests(unittest.TestCase):
     def setUp(self):

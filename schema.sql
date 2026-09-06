@@ -166,3 +166,13 @@ CREATE TABLE IF NOT EXISTS calendar_tokens (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     revoked_at TEXT
 );
+
+-- V0.10B: generic one-time-migration marker, so a data migration (like the
+-- legacy events.status -> user_event_status backfill) can tell "already
+-- applied" apart from "nothing to do yet" - not by guessing by table
+-- row counts, which can't distinguish a genuinely empty table from an
+-- interrupted migration.
+CREATE TABLE IF NOT EXISTS app_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);

@@ -15,6 +15,8 @@ from pathlib import Path
 import db as db_module
 import seed as seed_module
 
+SCHEMA_PATH_TEXT = db_module.SCHEMA_PATH.read_text()
+
 # The exact V0.2 schema (commit 2355e69), i.e. everything before this
 # feature's 5 new columns existed - used to simulate a real upgrade.
 PRE_V0_3B_SCHEMA = """
@@ -471,6 +473,145 @@ class UserFoundationMigrationTests(TempDbTestCase):
         ).fetchone()[0]
         conn.close()
         self.assertEqual(count, 0)
+
+    def test_new_event_after_migration_gets_no_row_even_after_another_init_db(self):
+        # V0.10B: the legacy-status backfill is a one-time installation
+        # migration, not perpetual sync - a service restart (another
+        # init_db() call) must not sweep up events discovered afterward.
+        self._seed_pre_v0_10a_db([{"name": "A", "status": "interested"}])
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        conn.execute("INSERT INTO events (name, status) VALUES ('New Event', 'new')")
+        conn.commit()
+        conn.close()
+
+        db_module.init_db()  # simulates a service restart
+
+        conn = db_module.get_db()
+        event_id = conn.execute("SELECT id FROM events WHERE name = 'New Event'").fetchone()["id"]
+        count = conn.execute(
+            "SELECT COUNT(*) FROM user_event_status WHERE event_id = ?", (event_id,)
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 0)
+
+
+class _FailOnMarkerConn:
+    """Wraps a real connection but fails the app_migrations marker INSERT -
+    proves an interrupted migration can't leave a false completed marker."""
+
+    def __init__(self, real_conn):
+        self._real = real_conn
+
+    def execute(self, sql, params=()):
+        if "INSERT INTO app_migrations" in sql:
+            raise sqlite3.OperationalError("simulated failure")
+        return self._real.execute(sql, params)
+
+    def commit(self):
+        self._real.commit()
+
+    def rollback(self):
+        self._real.rollback()
+
+
+class MigrationMarkerTests(TempDbTestCase):
+    """V0.10B: the legacy-status backfill is guarded by an explicit
+    app_migrations marker row, not the fragile "does user_event_status
+    have any rows" proxy - which couldn't tell a genuinely-empty
+    installation from an interrupted migration."""
+
+    MIGRATION_NAME = db_module.USER_EVENT_STATUS_MIGRATION_NAME
+
+    def _seed_pre_v0_10a_db(self, events):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(PRE_V0_10A_SCHEMA)
+        for event in events:
+            columns = ", ".join(event.keys())
+            placeholders = ", ".join(f":{k}" for k in event)
+            conn.execute(f"INSERT INTO events ({columns}) VALUES ({placeholders})", event)
+        conn.commit()
+        conn.close()
+
+    def test_marker_written_exactly_once(self):
+        self._seed_pre_v0_10a_db([{"name": "A", "status": "interested"}])
+        db_module.init_db()
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        rows = conn.execute(
+            "SELECT * FROM app_migrations WHERE name = ?", (self.MIGRATION_NAME,)
+        ).fetchall()
+        conn.close()
+        self.assertEqual(len(rows), 1)
+
+    def test_fresh_db_gets_marker_and_no_orphan_rows(self):
+        db_module.init_db()
+        conn = db_module.get_db()
+        row = conn.execute(
+            "SELECT * FROM app_migrations WHERE name = ?", (self.MIGRATION_NAME,)
+        ).fetchone()
+        count = conn.execute("SELECT COUNT(*) FROM user_event_status").fetchone()[0]
+        conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(count, 0)
+
+    def test_interrupted_migration_leaves_no_partially_committed_state(self):
+        # Full transaction-boundary audit: a pre-V0.10A DB (no users, no
+        # user_event_status, no marker, one legacy event) where the
+        # marker INSERT fails must leave ALL THREE migration steps
+        # uncommitted - not just the marker/backfill, but also step 1
+        # (bootstrap owner creation), which used to commit on its own via
+        # get_or_create_bootstrap_owner's internal conn.commit().
+        self._seed_pre_v0_10a_db([{"name": "A", "status": "interested"}])
+        conn = db_module.get_db()
+        conn.executescript(SCHEMA_PATH_TEXT)
+        db_module._migrate(conn)
+        before_event = dict(conn.execute("SELECT * FROM events WHERE name = 'A'").fetchone())
+        flaky = _FailOnMarkerConn(conn)
+
+        with self.assertRaises(sqlite3.OperationalError):
+            db_module._migrate_user_event_status(flaky)
+
+        owner_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        backfilled = conn.execute("SELECT COUNT(*) FROM user_event_status").fetchone()[0]
+        marker = conn.execute(
+            "SELECT * FROM app_migrations WHERE name = ?", (self.MIGRATION_NAME,)
+        ).fetchone()
+        after_event = dict(conn.execute("SELECT * FROM events WHERE name = 'A'").fetchone())
+        conn.close()
+
+        self.assertEqual(owner_count, 0, "bootstrap owner must not survive a failed migration")
+        self.assertEqual(backfilled, 0)
+        self.assertIsNone(marker)
+        self.assertEqual(before_event, after_event)
+
+    def test_retrying_after_interruption_succeeds_and_backfills_correctly(self):
+        self._seed_pre_v0_10a_db([{"name": "A", "status": "interested"}])
+        conn = db_module.get_db()
+        conn.executescript(SCHEMA_PATH_TEXT)
+        db_module._migrate(conn)
+        flaky = _FailOnMarkerConn(conn)
+        with self.assertRaises(sqlite3.OperationalError):
+            db_module._migrate_user_event_status(flaky)
+        conn.close()
+
+        db_module.init_db()  # real retry, unwrapped
+
+        conn = db_module.get_db()
+        owners = conn.execute("SELECT * FROM users WHERE email = 'owner@event-radar.local'").fetchall()
+        markers = conn.execute(
+            "SELECT * FROM app_migrations WHERE name = ?", (self.MIGRATION_NAME,)
+        ).fetchall()
+        status = conn.execute(
+            "SELECT ues.status FROM user_event_status ues JOIN events e ON e.id = ues.event_id "
+            "WHERE e.name = 'A' AND ues.user_id = ?", (owners[0]["id"],),
+        ).fetchone()["status"]
+        conn.close()
+        self.assertEqual(len(owners), 1)
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(status, "interested")
 
 
 class SeedLifecycleTests(TempDbTestCase):

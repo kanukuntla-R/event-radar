@@ -9,6 +9,24 @@ from proposal_resolver import accept_proposal, dismiss_proposal, StaleProposalEr
 from source_health import classify_source_health
 from source_recovery_resolver import accept_recovery_candidate, dismiss_recovery_candidate
 from event_review_resolver import accept_review_candidate, dismiss_review_candidate
+from user_store import get_or_create_bootstrap_owner, set_user_event_status
+
+# Explicit column list for the dashboard query - events.status is legacy
+# single-user state (V0.10A/B) and must NOT be selected alongside the
+# COALESCE(...) AS status alias below, since sqlite3.Row would then have
+# two columns literally named "status" and indexing by name returns
+# whichever comes first (the wrong, legacy one).
+_EVENT_COLUMNS_EXCEPT_LEGACY_STATUS = ", ".join(
+    f"e.{col}" for col in (
+        "id", "name", "event_type", "description", "start_date", "end_date",
+        "start_time", "end_time", "timezone", "date_status", "location",
+        "location_type", "source", "source_url", "organizer",
+        "registration_status", "registration_url", "application_deadline",
+        "last_checked", "travel_required", "event_state", "inactive_reason",
+        "last_check_status", "consecutive_failures", "last_successful_check",
+        "event_subtype", "location_area", "first_seen", "updated_at",
+    )
+)
 
 app = Flask(__name__)
 
@@ -121,9 +139,19 @@ def format_review_date(row):
 
 
 def _load_dashboard_events(conn):
+    """V0.10B: `status` for the bootstrap owner comes from
+    user_event_status.status, not the legacy events.status column - a
+    missing row (an event no one has acted on yet) reads as 'new'."""
+    owner = get_or_create_bootstrap_owner(conn)
+    conn.commit()  # get_or_create_bootstrap_owner doesn't commit itself
     return conn.execute(
-        "SELECT * FROM events "
-        "ORDER BY event_state = 'inactive', status = 'ignored', start_date IS NULL, start_date, name"
+        f"SELECT {_EVENT_COLUMNS_EXCEPT_LEGACY_STATUS}, "
+        "COALESCE(ues.status, 'new') AS status "
+        "FROM events e "
+        "LEFT JOIN user_event_status ues ON ues.event_id = e.id AND ues.user_id = ? "
+        "ORDER BY e.event_state = 'inactive', COALESCE(ues.status, 'new') = 'ignored', "
+        "e.start_date IS NULL, e.start_date, e.name",
+        (owner["id"],),
     ).fetchall()
 
 
@@ -175,14 +203,18 @@ def index():
 
 @app.route("/event/<int:event_id>/<action>", methods=["POST"])
 def set_status(event_id, action):
+    """V0.10B: writes only user_event_status for the bootstrap owner -
+    events.status (legacy) is never modified here. A nonexistent event_id
+    is a no-op (same as the old UPDATE ... WHERE id=? matching zero rows)."""
     if action not in ACTION_TO_STATUS:
         abort(404)
     conn = get_db()
-    conn.execute(
-        "UPDATE events SET status = ?, updated_at = datetime('now') WHERE id = ?",
-        (ACTION_TO_STATUS[action], event_id),
-    )
-    conn.commit()
+    owner = get_or_create_bootstrap_owner(conn)
+    conn.commit()  # get_or_create_bootstrap_owner doesn't commit itself
+    try:
+        set_user_event_status(conn, owner["id"], event_id, ACTION_TO_STATUS[action])
+    except ValueError:
+        pass
     conn.close()
     return redirect(url_for("index"))
 
@@ -293,10 +325,19 @@ def dismiss_review_route(review_id):
 
 @app.route("/calendar.ics")
 def calendar_ics():
+    """V0.10B: reflects the bootstrap owner's user_event_status, never the
+    legacy events.status column. A plain JOIN (not LEFT JOIN) naturally
+    excludes an event with no user_event_status row - missing means
+    effective status 'new', which must never appear on the calendar."""
     conn = get_db()
+    owner = get_or_create_bootstrap_owner(conn)
+    conn.commit()  # get_or_create_bootstrap_owner doesn't commit itself
     events = conn.execute(
-        "SELECT * FROM events WHERE status = 'interested' AND event_state = 'active' "
-        "ORDER BY start_date"
+        "SELECT e.* FROM events e "
+        "JOIN user_event_status ues ON ues.event_id = e.id AND ues.user_id = ? "
+        "WHERE ues.status = 'interested' AND e.event_state = 'active' "
+        "ORDER BY e.start_date",
+        (owner["id"],),
     ).fetchall()
     conn.close()
     return Response(

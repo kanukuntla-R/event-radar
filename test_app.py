@@ -18,9 +18,18 @@ _import_tmpdir = tempfile.TemporaryDirectory()
 db_module.DB_PATH = Path(_import_tmpdir.name) / "import-events.db"
 
 import app as app_module  # noqa: E402
+from user_store import get_or_create_bootstrap_owner, get_user_event_status, set_user_event_status  # noqa: E402
 
 
 def _insert_event(conn, **overrides):
+    """Inserts a shared event. A non-default `status` kwarg is mirrored
+    into user_event_status for the bootstrap owner too (in addition to
+    the legacy events.status column) - this is test convenience only, so
+    existing tests seeding "this event is Interested/Watching" keep
+    working against the new per-user read path without every call site
+    needing to change. Production discovery code does NOT do this (see
+    V0.10B: a newly discovered event intentionally gets no
+    user_event_status row until a user acts on it)."""
     fields = dict(
         name="Test Hack", date_status="confirmed", start_date="2026-10-03",
         end_date="2026-10-04", registration_status="unknown", registration_url=None,
@@ -31,7 +40,11 @@ def _insert_event(conn, **overrides):
     placeholders = ", ".join(f":{k}" for k in fields)
     cur = conn.execute(f"INSERT INTO events ({columns}) VALUES ({placeholders})", fields)
     conn.commit()
-    return cur.lastrowid
+    event_id = cur.lastrowid
+    if fields["status"] != "new":
+        owner = get_or_create_bootstrap_owner(conn)
+        set_user_event_status(conn, owner["id"], event_id, fields["status"])
+    return event_id
 
 
 def _insert_proposal(conn, event_id, field, old_value, new_value, status="pending", **overrides):
@@ -105,6 +118,15 @@ class AppTestCase(unittest.TestCase):
 
     def _event(self, event_id):
         return self.conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+
+    def _owner_id(self):
+        return get_or_create_bootstrap_owner(self.conn)["id"]
+
+    def _owner_status(self, event_id):
+        return get_user_event_status(self.conn, self._owner_id(), event_id)
+
+    def _set_owner_status(self, event_id, status):
+        set_user_event_status(self.conn, self._owner_id(), event_id, status)
 
     def _recovery_candidate(self, candidate_id):
         return self.conn.execute(
@@ -237,7 +259,8 @@ class ExistingBehaviorRegressionTests(AppTestCase):
         event_id = _insert_event(self.conn)
         resp = self.client.post(f"/event/{event_id}/interested")
         self.assertEqual(resp.status_code, 302)
-        self.assertEqual(self._event(event_id)["status"], "interested")
+        self.assertEqual(self._owner_status(event_id), "interested")
+        self.assertEqual(self._event(event_id)["status"], "new")  # legacy untouched
 
     def test_dashboard_renders_with_no_proposals(self):
         _insert_event(self.conn)
@@ -443,7 +466,8 @@ class AsuDashboardTests(AppTestCase):
         event_id = _insert_event(self.conn, event_type="asu")
         resp = self.client.post(f"/event/{event_id}/interested")
         self.assertEqual(resp.status_code, 302)
-        self.assertEqual(self._event(event_id)["status"], "interested")
+        self.assertEqual(self._owner_status(event_id), "interested")
+        self.assertEqual(self._event(event_id)["status"], "new")  # legacy untouched
 
 
 class CalendarLifecycleRegressionTests(AppTestCase):
@@ -460,7 +484,7 @@ class CalendarLifecycleRegressionTests(AppTestCase):
     def test_marking_inactive_preserves_interested_status(self):
         event_id = _insert_event(self.conn, name="Career Fair", status="interested", event_state="active")
         self.client.post(f"/event/{event_id}/inactive")
-        self.assertEqual(self._event(event_id)["status"], "interested")
+        self.assertEqual(self._owner_status(event_id), "interested")
         self.assertEqual(self._event(event_id)["event_state"], "inactive")
 
     def test_marking_inactive_removes_event_from_ics(self):
@@ -670,6 +694,139 @@ class AcceptedAllDayReviewCalendarTests(AppTestCase):
         ics = self.client.get("/calendar.ics").data.decode()
         self.assertIn("SUMMARY:All Day Fair", ics)
         self.assertIn("DTSTART;VALUE=DATE:20260915", ics)
+
+
+class PerUserStatusDashboardTests(AppTestCase):
+    """V0.10B: the dashboard's `status` field for the bootstrap owner now
+    comes from user_event_status, not the legacy events.status column."""
+
+    def test_owner_interested_status_shown(self):
+        event_id = _insert_event(self.conn, name="Career Fair")
+        self._set_owner_status(event_id, "interested")
+        html = self.client.get("/").data.decode()
+        self.assertIn("badge-interested", html)
+
+    def test_owner_watching_status_shown(self):
+        event_id = _insert_event(self.conn, name="Career Fair")
+        self._set_owner_status(event_id, "watching")
+        html = self.client.get("/").data.decode()
+        self.assertIn("badge-watching", html)
+
+    def test_owner_ignored_status_shown(self):
+        event_id = _insert_event(self.conn, name="Career Fair")
+        self._set_owner_status(event_id, "ignored")
+        html = self.client.get("/").data.decode()
+        self.assertIn("badge-ignored", html)
+
+    def test_missing_status_row_shown_as_new(self):
+        _insert_event(self.conn, name="Career Fair")  # default status="new", no owner row created
+        html = self.client.get("/").data.decode()
+        self.assertIn("badge-new", html)
+
+    def test_dashboard_ordering_uses_effective_status_not_legacy(self):
+        # Legacy events.status='ignored' but the owner's real per-user
+        # status is interested - ignored events sort last, so if ordering
+        # used the legacy column this would wrongly sort after a
+        # genuinely-new event instead of before it.
+        effectively_interested = _insert_event(self.conn, name="AAA Effectively Interested")
+        self.conn.execute("UPDATE events SET status = 'ignored' WHERE id = ?", (effectively_interested,))
+        self.conn.commit()
+        self._set_owner_status(effectively_interested, "interested")
+
+        _insert_event(self.conn, name="ZZZ Plain New")
+
+        html = self.client.get("/").data.decode()
+        self.assertLess(html.index("AAA Effectively Interested"), html.index("ZZZ Plain New"))
+
+    def test_conflicting_legacy_and_per_user_status_new_source_wins(self):
+        event_id = _insert_event(self.conn, name="Conflict Event")
+        self.conn.execute("UPDATE events SET status = 'ignored' WHERE id = ?", (event_id,))
+        self.conn.commit()
+        self._set_owner_status(event_id, "interested")
+
+        html = self.client.get("/").data.decode()
+        self.assertIn("badge-interested", html)
+        self.assertNotIn("badge-ignored", html)
+
+
+class StatusActionUserEventStatusTests(AppTestCase):
+    """V0.10B: Interested/Watching/Ignore write only user_event_status."""
+
+    def test_interested_writes_user_event_status(self):
+        event_id = _insert_event(self.conn)
+        self.client.post(f"/event/{event_id}/interested")
+        self.assertEqual(self._owner_status(event_id), "interested")
+
+    def test_watching_writes_user_event_status(self):
+        event_id = _insert_event(self.conn)
+        self.client.post(f"/event/{event_id}/watching")
+        self.assertEqual(self._owner_status(event_id), "watching")
+
+    def test_ignore_writes_user_event_status(self):
+        event_id = _insert_event(self.conn)
+        self.client.post(f"/event/{event_id}/ignore")
+        self.assertEqual(self._owner_status(event_id), "ignored")
+
+    def test_existing_per_user_row_updates_without_duplicating(self):
+        event_id = _insert_event(self.conn)
+        self.client.post(f"/event/{event_id}/interested")
+        self.client.post(f"/event/{event_id}/watching")
+        self.assertEqual(self._owner_status(event_id), "watching")
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM user_event_status WHERE event_id = ?", (event_id,)
+        ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_events_status_never_modified_by_any_action(self):
+        event_id = _insert_event(self.conn)
+        for action in ("interested", "watching", "ignore"):
+            self.client.post(f"/event/{event_id}/{action}")
+            self.assertEqual(self._event(event_id)["status"], "new")
+
+    def test_invalid_action_returns_404(self):
+        event_id = _insert_event(self.conn)
+        resp = self.client.post(f"/event/{event_id}/bogus")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_nonexistent_event_action_does_not_crash(self):
+        resp = self.client.post("/event/99999/interested")
+        self.assertEqual(resp.status_code, 302)
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM user_event_status WHERE event_id = 99999"
+        ).fetchone()[0]
+        self.assertEqual(count, 0)
+
+
+class PerUserCalendarConflictTests(AppTestCase):
+    """V0.10B: /calendar.ics must reflect the bootstrap owner's
+    user_event_status, never the legacy events.status column."""
+
+    def test_legacy_ignored_but_owner_interested_appears(self):
+        event_id = _insert_event(self.conn, name="Career Fair", event_state="active")
+        self.conn.execute("UPDATE events SET status = 'ignored' WHERE id = ?", (event_id,))
+        self.conn.commit()
+        self._set_owner_status(event_id, "interested")
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertIn("SUMMARY:Career Fair", ics)
+
+    def test_legacy_interested_but_owner_ignored_excluded(self):
+        event_id = _insert_event(self.conn, name="Career Fair", status="interested", event_state="active")
+        self._set_owner_status(event_id, "ignored")
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertNotIn("Career Fair", ics)
+
+    def test_legacy_interested_but_no_owner_row_excluded(self):
+        event_id = _insert_event(self.conn, name="Career Fair", event_state="active")
+        self.conn.execute("UPDATE events SET status = 'interested' WHERE id = ?", (event_id,))
+        self.conn.commit()
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertNotIn("Career Fair", ics)
+
+    def test_owner_interested_but_event_inactive_excluded(self):
+        event_id = _insert_event(self.conn, name="Career Fair", event_state="inactive")
+        self._set_owner_status(event_id, "interested")
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertNotIn("Career Fair", ics)
 
 
 if __name__ == "__main__":
