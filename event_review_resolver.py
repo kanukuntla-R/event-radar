@@ -42,11 +42,14 @@ def _candidate_from_review_row(row):
         "registration_status": row["registration_status"],
         "registration_url": row["registration_url"],
         "application_deadline": row["application_deadline"],
-        # A stored review row with a start_date but no start_time only ever
-        # got there because event_review_store.validate_review_candidate
-        # already confirmed it as all-day - safe to reconstruct the flag
-        # rather than persisting a separate column for it.
-        "all_day": row["start_time"] is None,
+        # V0.9B.2: use the persisted all_day column directly - do NOT infer
+        # it from start_time being NULL. That inference happened to be
+        # validation-safe today (a stored row with a start_date and no
+        # start_time currently can only exist because
+        # event_review_store.validate_review_candidate already required
+        # all_day=True to store it) but silently discarded the real
+        # evidence and was fragile to that one gate never changing.
+        "all_day": bool(row["all_day"]),
     }
 
 

@@ -1,0 +1,22 @@
+[Unit]
+Description=Event Radar dashboard (gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/kanukuntla-r/workspace/event-radar
+# 1 worker process (no SQLite multi-process contention beyond the existing
+# flock-serialized maintenance jobs) with 2 threads (gthread) for light
+# request concurrency - each request opens/closes its own sqlite3
+# connection (see db.py get_db()), so per-thread connections are safe.
+# Binds 0.0.0.0 - identical exposure to the previous `python app.py` dev
+# server (host="0.0.0.0", port=5000) - see deploy/systemd/README.md for
+# why this is the safest choice that doesn't change the existing Apple
+# Calendar subscription URL or risk a Tailscale-interface-not-up-yet
+# startup race.
+ExecStart=/home/kanukuntla-r/workspace/event-radar/.venv/bin/gunicorn --bind 0.0.0.0:5000 --workers 1 --worker-class gthread --threads 2 --access-logfile - app:app
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

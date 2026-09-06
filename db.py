@@ -31,12 +31,25 @@ NEW_COLUMNS = {
     "location_area": "TEXT",
 }
 
+REVIEW_CANDIDATE_NEW_COLUMNS = {
+    # V0.9B.2: without this, a REVIEW candidate's all_day evidence was lost
+    # while pending, so accept-time validation could wrongly treat an
+    # explicit all-day candidate as an incomplete timed one. See
+    # event_review_store.py / event_review_resolver.py.
+    "all_day": "INTEGER NOT NULL DEFAULT 0 CHECK (all_day IN (0, 1))",
+}
+
+
+def _migrate_table(conn, table, new_columns):
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, coltype in new_columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {coltype}")
+
 
 def _migrate(conn):
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
-    for name, coltype in NEW_COLUMNS.items():
-        if name not in existing:
-            conn.execute(f"ALTER TABLE events ADD COLUMN {name} {coltype}")
+    _migrate_table(conn, "events", NEW_COLUMNS)
+    _migrate_table(conn, "event_review_candidates", REVIEW_CANDIDATE_NEW_COLUMNS)
 
 
 def init_db():

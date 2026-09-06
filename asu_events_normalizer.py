@@ -43,6 +43,14 @@ def normalize_candidate(raw):
     start_date, end_date = parse_date_range(raw.get("date_text"))
     start_time, end_time = parse_time_range(time_text)
     all_day = is_explicit_all_day(time_text)
+    # Deliberately NOT applying asu_event_normalizer.resolve_timed_event_date_range
+    # here: the "first date - last date + one daily time window means a
+    # recurring series" pattern is only proven for ASU Career Services
+    # (career.eoss.asu.edu / uConnect - confirmed against that platform's
+    # own .ics export). A broader ASU Events (asuevents.asu.edu / Drupal)
+    # timed program legitimately spanning 8+ days must keep its real
+    # end_date unless this source independently provides its own
+    # recurrence evidence.
 
     location_text = _clean_text(raw.get("location_text"))
     location_info = classify_location(location_text)

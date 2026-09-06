@@ -76,6 +76,37 @@ class _FlakyConn:
         self._real.rollback()
 
 
+class AllDayAcceptTests(unittest.TestCase):
+    """V0.9B.2: accepting a review candidate must use the persisted
+    all_day column, not an inference from start_time being NULL."""
+
+    def setUp(self):
+        self.conn = _make_conn()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_accepting_explicit_all_day_review_creates_valid_all_day_event(self):
+        rid = _insert_review(self.conn, start_time=None, end_time=None, timezone=None, all_day=1)
+        outcome = accept_review_candidate(self.conn, rid, resolved_at=RESOLVED_AT)
+        self.assertIsNotNone(outcome["event_id"])
+        row = self.conn.execute("SELECT * FROM events WHERE id = ?", (outcome["event_id"],)).fetchone()
+        self.assertIsNone(row["start_time"])
+        self.assertEqual(row["start_date"], "2026-09-10")
+
+    def test_timed_review_candidate_unaffected_by_all_day_column(self):
+        rid = _insert_review(self.conn, all_day=0)
+        outcome = accept_review_candidate(self.conn, rid, resolved_at=RESOLVED_AT)
+        row = self.conn.execute("SELECT * FROM events WHERE id = ?", (outcome["event_id"],)).fetchone()
+        self.assertEqual(row["start_time"], "17:00")
+
+    def test_missing_time_and_all_day_0_still_fails_safely(self):
+        rid = _insert_review(self.conn, start_time=None, end_time=None, timezone=None, all_day=0)
+        with self.assertRaises(ValueError):
+            accept_review_candidate(self.conn, rid, resolved_at=RESOLVED_AT)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
+
+
 class AcceptTests(unittest.TestCase):
     def setUp(self):
         self.conn = _make_conn()

@@ -33,13 +33,13 @@ INSERT INTO event_review_candidates (
     name, event_type, event_subtype, description, start_date, end_date,
     start_time, end_time, timezone, location, location_type, location_area,
     source, source_url, organizer, registration_status, registration_url,
-    application_deadline, review_reason, review_signals, discovered_at,
+    application_deadline, all_day, review_reason, review_signals, discovered_at,
     status, created_at
 ) VALUES (
     :name, :event_type, :event_subtype, :description, :start_date, :end_date,
     :start_time, :end_time, :timezone, :location, :location_type, :location_area,
     :source, :source_url, :organizer, :registration_status, :registration_url,
-    :application_deadline, :review_reason, :review_signals, :discovered_at,
+    :application_deadline, :all_day, :review_reason, :review_signals, :discovered_at,
     'pending', :discovered_at
 )
 """
@@ -49,7 +49,7 @@ DEFAULTS = {
     "start_date": None, "end_date": None, "start_time": None, "end_time": None,
     "timezone": None, "location": None, "location_type": None, "location_area": None,
     "organizer": None, "registration_status": "unknown", "registration_url": None,
-    "application_deadline": None, "review_reason": None, "review_signals": None,
+    "application_deadline": None, "all_day": 0, "review_reason": None, "review_signals": None,
 }
 
 
@@ -170,6 +170,7 @@ def store_review_candidates(conn, candidates, discovered_at=None, dry_run=False)
         row = dict(DEFAULTS)
         row.update(candidate)
         row["discovered_at"] = discovered_at
+        row["all_day"] = 1 if candidate.get("all_day") else 0
         row["review_reason"] = candidate.get("review_reason")
         row["review_signals"] = json.dumps(candidate.get("review_signals") or [])
         cur = conn.execute(INSERT_SQL, row)

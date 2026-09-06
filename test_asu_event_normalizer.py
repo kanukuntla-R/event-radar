@@ -5,7 +5,10 @@ Run with: python -m unittest test_asu_event_normalizer -v
 """
 import unittest
 
-from asu_event_normalizer import normalize_candidate, parse_date_range, parse_time_range, is_explicit_all_day
+from asu_event_normalizer import (
+    normalize_candidate, parse_date_range, parse_time_range, is_explicit_all_day,
+    resolve_timed_event_date_range,
+)
 
 
 def _raw(**overrides):
@@ -34,6 +37,74 @@ class WhitespaceAndEntityTests(unittest.TestCase):
     def test_description_cleanup(self):
         candidate = normalize_candidate(_raw(description="Learn how&nbsp;to write a résumé.  "))
         self.assertEqual(candidate["description"], "Learn how to write a résumé.")
+
+
+class RecurringSeriesDateRangeTests(unittest.TestCase):
+    """V0.9B.1 regression: ASU Career Services sometimes represents a
+    recurring/multi-occurrence series (no structured recurrence data
+    anywhere, confirmed against the source's own .ics export) as a wide
+    "Date: first - last" range with one daily time window. That must never
+    become a single continuous multi-week/month timed event."""
+
+    def test_genuine_continuous_multi_day_event_is_unaffected(self):
+        # "One-on-One Career Chats with Gray Media" - real 1-day-span event.
+        end, _desc = resolve_timed_event_date_range("2026-09-09", "2026-09-10", "09:00", None)
+        self.assertEqual(end, "2026-09-10")
+
+    def test_single_day_timed_event_is_unaffected(self):
+        end, _desc = resolve_timed_event_date_range("2026-09-08", "2026-09-08", "10:00", None)
+        self.assertEqual(end, "2026-09-08")
+
+    def test_poly_drop_in_series_real_fixture_drops_distant_end_date(self):
+        candidate = normalize_candidate(_raw(
+            name="Poly Career Advising Drop-In's",
+            date_text="Wednesday, August 26, 2026 - Wednesday, December 2, 2026",
+            time_text="12pm - 2pm MST",
+            location_text="Poly, Technology Center, Suite 101",
+            description="During drop-in career support hours, staff can help you.",
+        ))
+        self.assertEqual(candidate["start_date"], "2026-08-26")
+        self.assertIsNone(candidate["end_date"])
+        self.assertIn("recurring/multi-occurrence series", candidate["description"])
+        self.assertIn("2026-12-02", candidate["description"])
+
+    def test_disney_info_session_real_fixture_drops_distant_end_date(self):
+        candidate = normalize_candidate(_raw(
+            name="Get To Know The Disney College Program - Fall 2026",
+            date_text="Tuesday, August 18, 2026 - Thursday, September 10, 2026",
+            time_text="8am - 11am MST",
+            location_text="Virtual",
+            description="Come join Recruiters with Disney Programs.",
+        ))
+        self.assertEqual(candidate["start_date"], "2026-08-18")
+        self.assertIsNone(candidate["end_date"])
+        self.assertIn("2026-09-10", candidate["description"])
+
+    def test_note_appended_even_with_no_prior_description(self):
+        candidate = normalize_candidate(_raw(
+            date_text="Monday, August 17, 2026 - Monday, December 21, 2026",
+            time_text="12pm - 1pm MST", description=None,
+        ))
+        self.assertIsNone(candidate["end_date"])
+        self.assertTrue(candidate["description"])
+
+    def test_no_start_time_leaves_date_range_untouched(self):
+        # this guard only applies to TIMED events - an all-day wide date
+        # range is a different semantic, out of scope here.
+        end, _desc = resolve_timed_event_date_range("2026-08-26", "2026-12-02", None, None)
+        self.assertEqual(end, "2026-12-02")
+
+    def test_exactly_at_threshold_is_kept(self):
+        end, _desc = resolve_timed_event_date_range("2026-08-26", "2026-09-02", "12:00", None)
+        self.assertEqual(end, "2026-09-02")
+
+    def test_one_day_past_threshold_is_dropped(self):
+        end, _desc = resolve_timed_event_date_range("2026-08-26", "2026-09-03", "12:00", None)
+        self.assertIsNone(end)
+
+    def test_missing_end_date_is_untouched(self):
+        end, _desc = resolve_timed_event_date_range("2026-08-26", None, "12:00", None)
+        self.assertIsNone(end)
 
 
 class DateTimeNormalizationTests(unittest.TestCase):

@@ -596,5 +596,81 @@ class ReviewCalendarRegressionTests(AppTestCase):
         self.assertIn("SUMMARY:Maosho", ics)
 
 
+class RecurringSeriesCalendarGuardTests(AppTestCase):
+    """V0.9B.1 defensive regression: calendar_service must never silently
+    turn a recurring/multi-occurrence series data mistake into an enormous
+    timed event - without adding an arbitrary duration cap that would
+    break a legitimate multi-day event. The real fix is in the normalizer
+    (it now stores end_date=None for a detected recurring series); these
+    tests prove the calendar layer renders that correctly, and that
+    genuine multi-day/same-day/all-day events are all unaffected."""
+
+    def test_same_day_timed_event_emits_correct_dtstart_dtend(self):
+        _insert_event(
+            self.conn, name="Same Day Talk", status="interested", event_state="active",
+            start_date="2026-09-08", end_date="2026-09-08", start_time="10:00", end_time="11:00",
+            timezone="America/Phoenix",
+        )
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertIn("DTSTART:20260908T170000Z", ics)
+        self.assertIn("DTEND:20260908T180000Z", ics)
+
+    def test_genuine_multi_day_timed_event_still_spans_correctly(self):
+        # "One-on-One Career Chats with Gray Media" real shape - a
+        # legitimate 2-day event must keep spanning both days.
+        _insert_event(
+            self.conn, name="Two Day Chat", status="interested", event_state="active",
+            start_date="2026-09-09", end_date="2026-09-10", start_time="09:00", end_time="17:00",
+            timezone="America/Phoenix",
+        )
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertIn("DTSTART:20260909T160000Z", ics)
+        self.assertIn("DTEND:20260911T000000Z", ics)
+
+    def test_recurring_series_representation_never_produces_giant_span(self):
+        # The normalizer now stores end_date=None for a detected recurring
+        # series (see test_asu_event_normalizer.RecurringSeriesDateRangeTests) -
+        # prove the calendar layer renders that as a short single-day
+        # entry, not the multi-month span the raw source data implied,
+        # even though calendar_service itself has no duration cap.
+        _insert_event(
+            self.conn, name="Poly Career Advising Drop-In's", status="interested", event_state="active",
+            start_date="2026-08-26", end_date=None, start_time="12:00", end_time="14:00",
+            timezone="America/Phoenix",
+        )
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertIn("DTSTART:20260826T190000Z", ics)
+        self.assertIn("DTEND:20260826T210000Z", ics)
+        self.assertNotIn("20261202", ics)
+
+    def test_all_day_behavior_unchanged(self):
+        _insert_event(
+            self.conn, name="All Day Hack", status="interested", event_state="active",
+            start_date="2026-09-05", end_date="2026-09-07", start_time=None,
+        )
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertIn("DTSTART;VALUE=DATE:20260905", ics)
+        self.assertIn("DTEND;VALUE=DATE:20260908", ics)
+
+
+class AcceptedAllDayReviewCalendarTests(AppTestCase):
+    """V0.9B.2: an explicit all-day REVIEW candidate must accept into a
+    genuinely all-day event and render correctly once marked Interested -
+    proving the persisted all_day column round-trips through accept."""
+
+    def test_accepted_all_day_review_renders_as_all_day_once_interested(self):
+        review_id = _insert_review_candidate(
+            self.conn, name="All Day Fair", start_time=None, end_time=None, timezone=None, all_day=1,
+        )
+        self.client.post(f"/review/{review_id}/accept")
+        row = self.conn.execute("SELECT id FROM events WHERE name = 'All Day Fair'").fetchone()
+        self.assertIsNotNone(row)
+
+        self.client.post(f"/event/{row['id']}/interested")
+        ics = self.client.get("/calendar.ics").data.decode()
+        self.assertIn("SUMMARY:All Day Fair", ics)
+        self.assertIn("DTSTART;VALUE=DATE:20260915", ics)
+
+
 if __name__ == "__main__":
     unittest.main()

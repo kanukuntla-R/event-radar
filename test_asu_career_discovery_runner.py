@@ -112,5 +112,54 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual(result["summary"]["candidates_found"], 1)
 
 
+class RecurringSeriesEndToEndTests(unittest.TestCase):
+    """V0.9B.1: the real Poly/Disney recurring-series shapes, run through
+    the full collect->normalize->dedup->store pipeline."""
+
+    def setUp(self):
+        self.conn = _make_conn()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _poly_raw(self):
+        return _raw(
+            name="Poly Career Advising Drop-In's",
+            date_text="Wednesday, August 26, 2026 - Wednesday, December 2, 2026",
+            time_text="12pm - 2pm MST", location_text="Poly, Technology Center, Suite 101",
+            source_url="https://career.eoss.asu.edu/events/2026/08/26/poly-career-advising-drop-ins",
+        )
+
+    def test_recurring_series_stored_as_single_first_occurrence(self):
+        result = run_asu_career_discovery(self.conn, collect_func=_fake_collect([self._poly_raw()]), discovered_at=DISCOVERED_AT)
+        self.assertEqual(result["summary"]["inserted"], 1)
+        row = self.conn.execute("SELECT * FROM events WHERE name = \"Poly Career Advising Drop-In's\"").fetchone()
+        self.assertEqual(row["start_date"], "2026-08-26")
+        self.assertIsNone(row["end_date"])
+
+    def test_repeat_discovery_of_recurring_series_is_idempotent(self):
+        run_asu_career_discovery(self.conn, collect_func=_fake_collect([self._poly_raw()]), discovered_at=DISCOVERED_AT)
+        result = run_asu_career_discovery(
+            self.conn, collect_func=_fake_collect([self._poly_raw()]), discovered_at="2026-09-06T00:00:00+00:00",
+        )
+        self.assertEqual(result["summary"]["inserted"], 0)
+        self.assertEqual(result["summary"]["duplicates_skipped"], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
+
+    def test_different_occurrence_page_with_distinct_url_is_a_distinct_event(self):
+        # a later, differently-dated occurrence listed at its OWN detail
+        # URL must not be collapsed into the first just because the name matches.
+        run_asu_career_discovery(self.conn, collect_func=_fake_collect([self._poly_raw()]), discovered_at=DISCOVERED_AT)
+        later = _raw(
+            name="Poly Career Advising Drop-In's",
+            date_text="Wednesday, January 6, 2027", time_text="12pm - 2pm MST",
+            location_text="Poly, Technology Center, Suite 101",
+            source_url="https://career.eoss.asu.edu/events/2027/01/06/poly-career-advising-drop-ins-2",
+        )
+        result = run_asu_career_discovery(self.conn, collect_func=_fake_collect([later]), discovered_at="2026-09-06T00:00:00+00:00")
+        self.assertEqual(result["summary"]["inserted"], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -67,6 +67,36 @@ class BasicStorageTests(unittest.TestCase):
         self.assertEqual(_pending_rows(self.conn), [])
 
 
+class AllDayPersistenceTests(unittest.TestCase):
+    """V0.9B.2: all_day must survive while a candidate sits pending -
+    never re-inferred from start_time being NULL."""
+
+    def setUp(self):
+        self.conn = _make_conn()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_explicit_all_day_candidate_stores_all_day_1(self):
+        candidate = _candidate(start_time=None, end_time=None, timezone=None, all_day=True)
+        store_review_candidates(self.conn, [candidate], discovered_at=DISCOVERED_AT)
+        row = _pending_rows(self.conn)[0]
+        self.assertEqual(row["all_day"], 1)
+
+    def test_timed_candidate_stores_all_day_0(self):
+        store_review_candidates(self.conn, [_candidate()], discovered_at=DISCOVERED_AT)
+        row = _pending_rows(self.conn)[0]
+        self.assertEqual(row["all_day"], 0)
+
+    def test_rediscovery_of_pending_all_day_review_is_idempotent(self):
+        candidate = _candidate(start_time=None, end_time=None, timezone=None, all_day=True)
+        store_review_candidates(self.conn, [candidate], discovered_at=DISCOVERED_AT)
+        result = store_review_candidates(self.conn, [candidate], discovered_at="2026-09-06T00:00:00+00:00")
+        self.assertEqual(result["stored"], [])
+        self.assertEqual(len(result["existing"]), 1)
+        self.assertEqual(len(_pending_rows(self.conn)), 1)
+
+
 class DedupTests(unittest.TestCase):
     def setUp(self):
         self.conn = _make_conn()

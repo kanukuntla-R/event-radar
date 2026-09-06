@@ -116,6 +116,10 @@ CREATE TABLE IF NOT EXISTS event_review_candidates (
     registration_status TEXT,
     registration_url TEXT,
     application_deadline TEXT,
+    -- Persists the transient all_day flag normalizers compute (see
+    -- asu_event_normalizer.is_explicit_all_day) so it survives while a
+    -- candidate sits pending - never inferred from start_time IS NULL.
+    all_day INTEGER NOT NULL DEFAULT 0 CHECK (all_day IN (0, 1)),
     review_reason TEXT,
     review_signals TEXT,
     discovered_at TEXT NOT NULL,

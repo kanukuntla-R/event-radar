@@ -57,6 +57,26 @@ class DateTimeTests(unittest.TestCase):
         self.assertTrue(candidate["all_day"])
         self.assertIsNone(candidate["start_time"])
 
+    def test_wide_timed_date_range_is_preserved_not_truncated(self):
+        # V0.9B.2: the "first date - last date + one daily time window
+        # means a recurring series" heuristic is proven ONLY for ASU
+        # Career Services (career.eoss.asu.edu / uConnect), via that
+        # platform's own .ics export. ASU Events (asuevents.asu.edu /
+        # Drupal) is a different source/platform with no such proof - a
+        # legitimate long-running timed program here must keep its real
+        # end_date rather than being silently truncated to one day.
+        candidate = normalize_candidate(_raw(
+            date_text="Wed, Aug 26, 2026 - Wed, Dec 2, 2026", time_text="12:00 pm &ndash; 2:00 pm (MST)",
+        ))
+        self.assertEqual(candidate["start_date"], "2026-08-26")
+        self.assertEqual(candidate["end_date"], "2026-12-02")
+        self.assertIsNone(candidate["description"])
+
+    def test_genuine_short_multi_day_event_unaffected(self):
+        candidate = normalize_candidate(_raw(date_text="Wed, Sep 9, 2026 - Thu, Sep 10, 2026"))
+        self.assertEqual(candidate["start_date"], "2026-09-09")
+        self.assertEqual(candidate["end_date"], "2026-09-10")
+
     def test_unparseable_time_rejected_downstream_not_treated_as_all_day(self):
         candidate = normalize_candidate(_raw(time_text="Times vary"))
         self.assertFalse(candidate["all_day"])

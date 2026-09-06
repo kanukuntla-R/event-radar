@@ -2,16 +2,20 @@
 # Copies this repo's canonical systemd --user unit files (deploy/systemd/)
 # into ~/.config/systemd/user/ and reloads the user systemd daemon.
 #
-# This script ONLY installs/updates the unit files. It never enables or
-# starts a timer - that stays a separate, explicit step you run yourself:
+# Installs both the maintenance timers (event-radar-*.timer/.service) and
+# the persistent dashboard service (event-radar-web.service).
 #
-#   systemctl --user enable --now event-radar-<name>.timer
+# This script ONLY installs/updates the unit files. It never enables or
+# starts anything - that stays a separate, explicit step you run yourself:
+#
+#   systemctl --user enable --now event-radar-<name>.timer   # maintenance jobs
+#   systemctl --user enable --now event-radar-web.service    # dashboard
 #
 # Editing files under deploy/systemd/ does NOT change the installed units
 # in ~/.config/systemd/user/ - re-run this script to pick up edits.
 #
 # Usage:
-#   deploy/install-user-timers.sh
+#   deploy/install-user-units.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,5 +42,6 @@ systemctl --user daemon-reload
 echo
 echo "Installed $((${#units[@]})) unit file(s) to $UNIT_DEST_DIR and reloaded the user daemon."
 echo "Nothing has been enabled or started."
-echo "To enable a timer:   systemctl --user enable --now <unit>.timer"
-echo "To list timers:      systemctl --user list-timers --all"
+echo "To enable a timer:    systemctl --user enable --now <unit>.timer"
+echo "To enable the web UI: systemctl --user enable --now event-radar-web.service"
+echo "To list timers:       systemctl --user list-timers --all"

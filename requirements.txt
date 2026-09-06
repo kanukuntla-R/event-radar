@@ -1,1 +1,5 @@
 Flask
+# Production-ish WSGI server for running the dashboard as a persistent
+# systemd --user service (V0.9B) - Flask's own dev server (debug=True,
+# single-threaded, auto-reloader) isn't appropriate for that.
+gunicorn
