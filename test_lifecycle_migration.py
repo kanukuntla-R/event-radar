@@ -227,6 +227,252 @@ class ReviewCandidateMigrationTests(TempDbTestCase):
         self.assertEqual(columns.count("all_day"), 1)
 
 
+# The full pre-V0.10A schema (events + proposals + recovery + review
+# candidates, no users/user_event_status/calendar_tokens) - used to
+# simulate migrating a real, already-live installation forward.
+PRE_V0_10A_SCHEMA = """
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    event_type TEXT,
+    description TEXT,
+    start_date TEXT,
+    end_date TEXT,
+    start_time TEXT,
+    end_time TEXT,
+    timezone TEXT,
+    date_status TEXT NOT NULL DEFAULT 'confirmed' CHECK (date_status IN ('confirmed', 'tba')),
+    location TEXT,
+    location_type TEXT,
+    source TEXT,
+    source_url TEXT,
+    organizer TEXT,
+    registration_status TEXT,
+    registration_url TEXT,
+    application_deadline TEXT,
+    last_checked TEXT,
+    travel_required INTEGER,
+    event_state TEXT NOT NULL DEFAULT 'active' CHECK (event_state IN ('active', 'inactive')),
+    inactive_reason TEXT,
+    last_check_status TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+    last_successful_check TEXT,
+    event_subtype TEXT,
+    location_area TEXT,
+    status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'interested', 'watching', 'ignored')),
+    first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS event_change_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL REFERENCES events(id),
+    field TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT NOT NULL,
+    evidence TEXT,
+    source_result TEXT,
+    detected_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'dismissed')),
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS source_recovery_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL REFERENCES events(id),
+    candidate_url TEXT NOT NULL,
+    candidate_type TEXT NOT NULL CHECK (candidate_type IN (
+        'official_event', 'official_organizer', 'official_university',
+        'mlh', 'official_social', 'other'
+    )),
+    title TEXT,
+    evidence TEXT,
+    confidence TEXT NOT NULL CHECK (confidence IN ('high', 'medium', 'low')),
+    discovered_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'dismissed')),
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS event_review_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    event_type TEXT,
+    event_subtype TEXT,
+    description TEXT,
+    start_date TEXT,
+    end_date TEXT,
+    start_time TEXT,
+    end_time TEXT,
+    timezone TEXT,
+    location TEXT,
+    location_type TEXT,
+    location_area TEXT,
+    source TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    organizer TEXT,
+    registration_status TEXT,
+    registration_url TEXT,
+    application_deadline TEXT,
+    all_day INTEGER NOT NULL DEFAULT 0 CHECK (all_day IN (0, 1)),
+    review_reason TEXT,
+    review_signals TEXT,
+    discovered_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'dismissed')),
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+
+class UserFoundationMigrationTests(TempDbTestCase):
+    """V0.10A: users / user_event_status / calendar_tokens foundation.
+    events.status must survive untouched; user_event_status is seeded
+    once, for a bootstrap owner, from events.status - and never
+    overwritten again once a row exists."""
+
+    def _seed_pre_v0_10a_db(self, events):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(PRE_V0_10A_SCHEMA)
+        for event in events:
+            columns = ", ".join(event.keys())
+            placeholders = ", ".join(f":{k}" for k in event)
+            conn.execute(f"INSERT INTO events ({columns}) VALUES ({placeholders})", event)
+        conn.commit()
+        conn.close()
+
+    def _owner_id(self, conn):
+        return conn.execute(
+            "SELECT id FROM users WHERE email = 'owner@event-radar.local'"
+        ).fetchone()["id"]
+
+    def test_new_tables_created_on_fresh_db(self):
+        db_module.init_db()
+        conn = db_module.get_db()
+        tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        conn.close()
+        for table in ("users", "user_event_status", "calendar_tokens"):
+            self.assertIn(table, tables)
+
+    def test_bootstrap_owner_created_exactly_once(self):
+        self._seed_pre_v0_10a_db([{"name": "MHacks", "status": "watching"}])
+        db_module.init_db()
+        db_module.init_db()  # rerun - must not create a second owner
+
+        conn = db_module.get_db()
+        owners = conn.execute("SELECT * FROM users WHERE email = 'owner@event-radar.local'").fetchall()
+        conn.close()
+        self.assertEqual(len(owners), 1)
+
+    def test_every_existing_event_gets_one_preserved_status_row(self):
+        self._seed_pre_v0_10a_db([
+            {"name": "A", "status": "new"},
+            {"name": "B", "status": "interested"},
+            {"name": "C", "status": "watching"},
+            {"name": "D", "status": "ignored"},
+        ])
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        owner_id = self._owner_id(conn)
+        rows = conn.execute(
+            "SELECT e.name, ues.status FROM events e "
+            "JOIN user_event_status ues ON ues.event_id = e.id AND ues.user_id = ?",
+            (owner_id,),
+        ).fetchall()
+        conn.close()
+
+        self.assertEqual(
+            {row["name"]: row["status"] for row in rows},
+            {"A": "new", "B": "interested", "C": "watching", "D": "ignored"},
+        )
+
+    def test_migration_is_idempotent(self):
+        self._seed_pre_v0_10a_db([{"name": "A", "status": "interested"}])
+        db_module.init_db()
+        db_module.init_db()
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        count = conn.execute("SELECT COUNT(*) FROM user_event_status").fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 1)
+
+    def test_rerunning_migration_does_not_overwrite_changed_user_event_status(self):
+        self._seed_pre_v0_10a_db([{"name": "A", "status": "interested"}])
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        owner_id = self._owner_id(conn)
+        event_id = conn.execute("SELECT id FROM events WHERE name = 'A'").fetchone()["id"]
+        conn.execute(
+            "UPDATE user_event_status SET status = 'ignored' WHERE user_id = ? AND event_id = ?",
+            (owner_id, event_id),
+        )
+        conn.commit()
+        conn.close()
+
+        db_module.init_db()  # rerun - must leave the changed row alone
+
+        conn = db_module.get_db()
+        status = conn.execute(
+            "SELECT status FROM user_event_status WHERE user_id = ? AND event_id = ?",
+            (owner_id, event_id),
+        ).fetchone()["status"]
+        conn.close()
+        self.assertEqual(status, "ignored")
+
+    def test_existing_event_rows_unchanged_by_migration(self):
+        self._seed_pre_v0_10a_db([{"name": "A", "status": "interested", "source": "ASU Events"}])
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        before = dict(conn.execute("SELECT * FROM events WHERE name = 'A'").fetchone())
+        conn.close()
+
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        after = dict(conn.execute("SELECT * FROM events WHERE name = 'A'").fetchone())
+        conn.close()
+        for key in before:
+            self.assertEqual(before[key], after[key], key)
+
+    def test_review_and_proposal_tables_remain_intact(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(PRE_V0_10A_SCHEMA)
+        conn.execute(
+            "INSERT INTO event_review_candidates "
+            "(name, source, source_url, discovered_at, status) "
+            "VALUES ('Maosho', 'ASU Events', 'https://asuevents.asu.edu/event/maosho', "
+            "'2026-09-05T00:00:00+00:00', 'pending')"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        row = conn.execute("SELECT * FROM event_review_candidates WHERE name = 'Maosho'").fetchone()
+        conn.close()
+        self.assertEqual(row["status"], "pending")
+
+    def test_inserting_a_bare_event_does_not_auto_create_status_row(self):
+        # Only the migration step backfills user_event_status - it isn't a
+        # DB trigger, so a plain INSERT between migration runs shouldn't
+        # spontaneously get one.
+        db_module.init_db()
+        conn = db_module.get_db()
+        conn.execute("INSERT INTO events (name, status) VALUES ('New Event', 'new')")
+        conn.commit()
+        event_id = conn.execute("SELECT id FROM events WHERE name = 'New Event'").fetchone()["id"]
+        count = conn.execute(
+            "SELECT COUNT(*) FROM user_event_status WHERE event_id = ?", (event_id,)
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 0)
+
+
 class SeedLifecycleTests(TempDbTestCase):
     def test_freshly_seeded_hackathons_default_to_active(self):
         seed_module.seed()

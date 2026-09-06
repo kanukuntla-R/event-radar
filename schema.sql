@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS events (
     -- location_area: nullable. V0.8A values: tempe | scottsdale | chandler |
     -- phoenix | mesa | online | hybrid | other (see event_location.py)
     location_area TEXT,
+    -- V0.10A: legacy single-user state. Preserved and still read/written by
+    -- the app for now; user_event_status (below) is the future per-user
+    -- source of truth once the app switches over in a later phase.
     status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'interested', 'watching', 'ignored')),
     first_seen TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -126,4 +129,40 @@ CREATE TABLE IF NOT EXISTS event_review_candidates (
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'dismissed')),
     resolved_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- V0.10A multi-user foundation. events stays shared across all users;
+-- per-user state lives here instead. No login/register UI yet - see
+-- db.py for the bootstrap-owner migration that seeds this table from the
+-- legacy events.status column for the current (single) installation.
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    password_hash TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Per-user event status. events.status is legacy single-user state, kept
+-- temporarily for compatibility; this table is the future source of
+-- truth once the app switches over. Shared events are never duplicated
+-- per user - only this join row is.
+CREATE TABLE IF NOT EXISTS user_event_status (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    event_id INTEGER NOT NULL REFERENCES events(id),
+    status TEXT NOT NULL CHECK (status IN ('new', 'interested', 'watching', 'ignored')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, event_id)
+);
+
+-- Opaque per-user tokens for future private ICS subscription URLs.
+-- No route exposes these yet (V0.10A is foundation only).
+CREATE TABLE IF NOT EXISTS calendar_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    token TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    revoked_at TEXT
 );

@@ -1,6 +1,8 @@
 import sqlite3
 from pathlib import Path
 
+from user_store import get_or_create_bootstrap_owner
+
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data" / "events.db"
 SCHEMA_PATH = BASE_DIR / "schema.sql"
@@ -52,10 +54,26 @@ def _migrate(conn):
     _migrate_table(conn, "event_review_candidates", REVIEW_CANDIDATE_NEW_COLUMNS)
 
 
+def _migrate_user_event_status(conn):
+    """V0.10A: one-time-per-event backfill of user_event_status from the
+    legacy events.status column, for a single bootstrap owner. Only ever
+    INSERTs a row for an (owner, event) pair that has none yet - never
+    touches a row that already exists, so a later per-user choice is
+    never reset back to whatever events.status happens to say."""
+    owner = get_or_create_bootstrap_owner(conn)
+    conn.execute(
+        "INSERT INTO user_event_status (user_id, event_id, status, created_at, updated_at) "
+        "SELECT ?, id, status, datetime('now'), datetime('now') FROM events "
+        "WHERE id NOT IN (SELECT event_id FROM user_event_status WHERE user_id = ?)",
+        (owner["id"], owner["id"]),
+    )
+
+
 def init_db():
     DB_PATH.parent.mkdir(exist_ok=True)
     conn = get_db()
     conn.executescript(SCHEMA_PATH.read_text())
     _migrate(conn)
+    _migrate_user_event_status(conn)
     conn.commit()
     conn.close()
