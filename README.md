@@ -17,9 +17,9 @@ python app.py        # runs on http://0.0.0.0:5000
 
 - Dashboard at `/` lists all events with three actions: Interested, Watching,
   Ignore.
-- `/calendar.ics` returns an ICS feed containing only events marked
-  Interested. Point your calendar app's "subscribe by URL" at this endpoint,
-  or download it manually.
+- `/calendar` (after logging in) shows your private calendar subscription
+  URL, an ICS feed containing only your own Interested events. Point your
+  calendar app's "subscribe by URL" at that private URL.
 
 ## Not in V0
 

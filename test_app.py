@@ -29,7 +29,7 @@ os.environ["EVENT_RADAR_SECRET_KEY"] = "test-only-secret-key-do-not-use-in-produ
 import app as app_module  # noqa: E402
 from user_store import (  # noqa: E402
     get_or_create_bootstrap_owner, get_user_event_status, set_user_event_status,
-    create_user, set_user_password,
+    create_user, set_user_password, create_calendar_token,
 )
 
 OWNER_TEST_PASSWORD = "owner-test-password-not-real"  # noqa: S105 (test fixture, not a real credential)
@@ -168,6 +168,16 @@ class AppTestCase(unittest.TestCase):
 
     def _set_owner_status(self, event_id, status):
         set_user_event_status(self.conn, self._owner_id(), event_id, status)
+
+    def _owner_ics(self):
+        """Fetches the owner's calendar feed via the tokenized route
+        (replaces the removed legacy /calendar.ics endpoint - same
+        underlying query/exclusion behavior, see private_calendar_ics in
+        app.py). Creates the owner's token lazily, once per test."""
+        if not hasattr(self, "_owner_raw_token"):
+            self._owner_raw_token = create_calendar_token(self.conn, self._owner_id())
+            self.conn.commit()
+        return self.client.get(f"/calendar/{self._owner_raw_token}.ics").data.decode()
 
     def _recovery_candidate(self, candidate_id):
         return self.conn.execute(
@@ -514,12 +524,12 @@ class AsuDashboardTests(AppTestCase):
 class CalendarLifecycleRegressionTests(AppTestCase):
     def test_interested_active_event_appears_in_ics(self):
         _insert_event(self.conn, name="Career Fair", status="interested", event_state="active")
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertIn("SUMMARY:Career Fair", ics)
 
     def test_interested_inactive_event_excluded_from_ics(self):
         _insert_event(self.conn, name="Canceled Fair", status="interested", event_state="inactive")
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertNotIn("Canceled Fair", ics)
 
     def test_marking_inactive_preserves_interested_status(self):
@@ -531,28 +541,28 @@ class CalendarLifecycleRegressionTests(AppTestCase):
     def test_marking_inactive_removes_event_from_ics(self):
         event_id = _insert_event(self.conn, name="Career Fair", status="interested", event_state="active")
         self._post(f"/event/{event_id}/inactive")
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertNotIn("Career Fair", ics)
 
     def test_reactivating_returns_event_to_ics(self):
         event_id = _insert_event(self.conn, name="Career Fair", status="interested", event_state="inactive")
-        ics_before = self.client.get("/calendar.ics").data.decode()
+        ics_before = self._owner_ics()
         self.assertNotIn("Career Fair", ics_before)
 
         self._post(f"/event/{event_id}/reactivate")
         self.assertEqual(self._event(event_id)["status"], "interested")
-        ics_after = self.client.get("/calendar.ics").data.decode()
+        ics_after = self._owner_ics()
         self.assertIn("SUMMARY:Career Fair", ics_after)
 
     def test_tba_no_date_event_still_excluded(self):
         _insert_event(self.conn, name="TBA Event", status="interested", event_state="active",
                        date_status="tba", start_date=None)
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertNotIn("TBA Event", ics)
 
     def test_non_interested_active_event_excluded(self):
         _insert_event(self.conn, name="Just Watching", status="watching", event_state="active")
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertNotIn("Just Watching", ics)
 
     def test_genuine_all_day_event_still_renders_as_all_day(self):
@@ -563,7 +573,7 @@ class CalendarLifecycleRegressionTests(AppTestCase):
         # legitimately has start_time=None, ICS rendering must still treat
         # it as all-day.
         _insert_event(self.conn, name="Local Hack Day", status="interested", event_state="active", start_time=None)
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertIn("SUMMARY:Local Hack Day", ics)
         self.assertIn("DTSTART;VALUE=DATE:", ics)
 
@@ -643,13 +653,13 @@ class ReviewRouteTests(AppTestCase):
 class ReviewCalendarRegressionTests(AppTestCase):
     def test_pending_review_candidate_absent_from_ics(self):
         _insert_review_candidate(self.conn, name="Maosho")
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertNotIn("Maosho", ics)
 
     def test_newly_accepted_status_new_event_absent_from_ics(self):
         review_id = _insert_review_candidate(self.conn, name="Maosho")
         self._post(f"/review/{review_id}/accept")
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertNotIn("Maosho", ics)
 
     def test_only_interested_active_event_appears_after_manual_interested(self):
@@ -657,7 +667,7 @@ class ReviewCalendarRegressionTests(AppTestCase):
         self._post(f"/review/{review_id}/accept")
         row = self.conn.execute("SELECT id FROM events WHERE name = 'Maosho'").fetchone()
         self._post(f"/event/{row['id']}/interested")
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertIn("SUMMARY:Maosho", ics)
 
 
@@ -676,7 +686,7 @@ class RecurringSeriesCalendarGuardTests(AppTestCase):
             start_date="2026-09-08", end_date="2026-09-08", start_time="10:00", end_time="11:00",
             timezone="America/Phoenix",
         )
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertIn("DTSTART:20260908T170000Z", ics)
         self.assertIn("DTEND:20260908T180000Z", ics)
 
@@ -688,7 +698,7 @@ class RecurringSeriesCalendarGuardTests(AppTestCase):
             start_date="2026-09-09", end_date="2026-09-10", start_time="09:00", end_time="17:00",
             timezone="America/Phoenix",
         )
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertIn("DTSTART:20260909T160000Z", ics)
         self.assertIn("DTEND:20260911T000000Z", ics)
 
@@ -703,7 +713,7 @@ class RecurringSeriesCalendarGuardTests(AppTestCase):
             start_date="2026-08-26", end_date=None, start_time="12:00", end_time="14:00",
             timezone="America/Phoenix",
         )
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertIn("DTSTART:20260826T190000Z", ics)
         self.assertIn("DTEND:20260826T210000Z", ics)
         self.assertNotIn("20261202", ics)
@@ -713,7 +723,7 @@ class RecurringSeriesCalendarGuardTests(AppTestCase):
             self.conn, name="All Day Hack", status="interested", event_state="active",
             start_date="2026-09-05", end_date="2026-09-07", start_time=None,
         )
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertIn("DTSTART;VALUE=DATE:20260905", ics)
         self.assertIn("DTEND;VALUE=DATE:20260908", ics)
 
@@ -732,7 +742,7 @@ class AcceptedAllDayReviewCalendarTests(AppTestCase):
         self.assertIsNotNone(row)
 
         self._post(f"/event/{row['id']}/interested")
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertIn("SUMMARY:All Day Fair", ics)
         self.assertIn("DTSTART;VALUE=DATE:20260915", ics)
 
@@ -839,35 +849,66 @@ class StatusActionUserEventStatusTests(AppTestCase):
 
 
 class PerUserCalendarConflictTests(AppTestCase):
-    """V0.10B: /calendar.ics must reflect the bootstrap owner's
-    user_event_status, never the legacy events.status column."""
+    """V0.10B: the owner's calendar feed must reflect user_event_status,
+    never the legacy events.status column."""
 
     def test_legacy_ignored_but_owner_interested_appears(self):
         event_id = _insert_event(self.conn, name="Career Fair", event_state="active")
         self.conn.execute("UPDATE events SET status = 'ignored' WHERE id = ?", (event_id,))
         self.conn.commit()
         self._set_owner_status(event_id, "interested")
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertIn("SUMMARY:Career Fair", ics)
 
     def test_legacy_interested_but_owner_ignored_excluded(self):
         event_id = _insert_event(self.conn, name="Career Fair", status="interested", event_state="active")
         self._set_owner_status(event_id, "ignored")
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertNotIn("Career Fair", ics)
 
     def test_legacy_interested_but_no_owner_row_excluded(self):
         event_id = _insert_event(self.conn, name="Career Fair", event_state="active")
         self.conn.execute("UPDATE events SET status = 'interested' WHERE id = ?", (event_id,))
         self.conn.commit()
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertNotIn("Career Fair", ics)
 
     def test_owner_interested_but_event_inactive_excluded(self):
         event_id = _insert_event(self.conn, name="Career Fair", event_state="inactive")
         self._set_owner_status(event_id, "interested")
-        ics = self.client.get("/calendar.ics").data.decode()
+        ics = self._owner_ics()
         self.assertNotIn("Career Fair", ics)
+
+
+class LegacyCalendarRemovalTests(AppTestCase):
+    """Cleanup phase after V0.10D: the temporary unauthenticated
+    /calendar.ics feed is gone now that the owner has migrated to the
+    tokenized feed. The tokenized route is unaffected."""
+
+    def test_legacy_calendar_ics_route_is_gone(self):
+        resp = self.client.get("/calendar.ics")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_private_token_feed_still_works(self):
+        from user_store import create_calendar_token
+        raw_token = create_calendar_token(self.conn, self.owner["id"])
+        self.conn.commit()
+        _insert_event(self.conn, name="Career Fair", status="interested", event_state="active")
+        resp = self.client.get(f"/calendar/{raw_token}.ics")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("SUMMARY:Career Fair", resp.data.decode())
+
+    def test_invalid_token_behavior_unchanged(self):
+        resp = self.client.get("/calendar/not-a-real-token.ics")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_revoked_token_behavior_unchanged(self):
+        from user_store import create_calendar_token, revoke_calendar_token
+        raw_token = create_calendar_token(self.conn, self.owner["id"])
+        self.conn.commit()
+        revoke_calendar_token(self.conn, self.owner["id"])
+        resp = self.client.get(f"/calendar/{raw_token}.ics")
+        self.assertEqual(resp.status_code, 404)
 
 
 def _create_friend(conn, email="friend@example.com", password="friend-test-password"):

@@ -11,7 +11,7 @@ from source_health import classify_source_health
 from source_recovery_resolver import accept_recovery_candidate, dismiss_recovery_candidate
 from event_review_resolver import accept_review_candidate, dismiss_review_candidate
 from user_store import (
-    get_or_create_bootstrap_owner, set_user_event_status, verify_user_password,
+    set_user_event_status, verify_user_password,
     get_active_calendar_token_for_user, create_calendar_token,
     rotate_calendar_token, revoke_calendar_token, get_user_for_calendar_token,
 )
@@ -517,43 +517,6 @@ def private_calendar_ics(token):
         },
     )
 
-
-@app.route("/calendar.ics")
-def calendar_ics():
-    """TEMPORARY LEGACY BEHAVIOR - REMOVE AFTER OWNER MIGRATES TO THE
-    TOKENIZED FEED (private_calendar_ics above). Kept working, unchanged,
-    because the human's real Apple Calendar is already subscribed to this
-    exact URL - breaking it before the new feed is reviewed and adopted
-    is not acceptable. Not advertised anywhere in the UI; the /calendar
-    settings page only ever offers tokenized URLs.
-
-    Deliberately unauthenticated: Apple Calendar's ICS subscription
-    fetcher cannot participate in the browser login session, so for this
-    transition phase this feed keeps serving the bootstrap owner's own
-    Interested + active events specifically - never "whichever browser
-    user happens to be logged in" (there is no logged-in user for this
-    request at all).
-
-    Reflects user_event_status, never the legacy events.status column. A
-    plain JOIN (not LEFT JOIN) naturally excludes an event with no
-    user_event_status row - missing means effective status 'new', which
-    must never appear on the calendar."""
-    conn = get_db()
-    owner = get_or_create_bootstrap_owner(conn)
-    conn.commit()  # get_or_create_bootstrap_owner doesn't commit itself
-    events = conn.execute(
-        "SELECT e.* FROM events e "
-        "JOIN user_event_status ues ON ues.event_id = e.id AND ues.user_id = ? "
-        "WHERE ues.status = 'interested' AND e.event_state = 'active' "
-        "ORDER BY e.start_date",
-        (owner["id"],),
-    ).fetchall()
-    conn.close()
-    return Response(
-        generate_ics(events),
-        mimetype="text/calendar",
-        headers={"Content-Disposition": "attachment; filename=event-radar.ics"},
-    )
 
 
 if __name__ == "__main__":

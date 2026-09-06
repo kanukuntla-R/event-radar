@@ -126,9 +126,10 @@ flock. There was no demonstrated need for WAL mode or a custom timeout, so
 none was added.
 
 **From another Tailscale device** (e.g. your Mac): open
-`http://100.86.220.80:5000/` in a browser, or subscribe Apple Calendar to
-`http://100.86.220.80:5000/calendar.ics` (or whatever address/port the
-existing subscription already uses - unchanged by this phase).
+`http://100.86.220.80:5000/` in a browser, log in, and visit `/calendar`
+to get your private per-user calendar subscription URL for Apple Calendar
+(or whatever address/port the existing subscription already uses -
+unchanged by this phase).
 
 ## Authentication deployment (V0.10C)
 
@@ -162,9 +163,7 @@ systemctl --user restart event-radar-web.service
 
 Until steps 1-3 are all done, the owner's `password_hash` stays `NULL`
 and login is impossible - restarting onto V0.10C code before setting a
-password would lock out the dashboard (the legacy `/calendar.ics` feed
-would keep working regardless, since it's intentionally unauthenticated
-for this transition phase - see `app.py`'s `calendar_ics()`).
+password would lock out the dashboard entirely.
 
 **Cookie security**: `SESSION_COOKIE_SECURE` is off by default (this
 deployment is HTTP over trusted Tailscale/LAN - a Secure cookie simply
@@ -210,7 +209,8 @@ HTTP before trusting it:
 ```
 systemctl --user start event-radar-web.service
 curl -I http://127.0.0.1:5000/
-curl http://127.0.0.1:5000/calendar.ics
+# Calendar feeds require a per-user token now (see /calendar in a browser
+# after logging in) - there is no unauthenticated calendar endpoint to curl.
 ```
 
 ## Enabling (only after validation passes)
