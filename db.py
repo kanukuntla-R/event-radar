@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 
-from user_store import get_or_create_bootstrap_owner
+from user_store import get_or_create_bootstrap_owner, BOOTSTRAP_OWNER_EMAIL
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "data" / "events.db"
@@ -41,6 +41,13 @@ REVIEW_CANDIDATE_NEW_COLUMNS = {
     "all_day": "INTEGER NOT NULL DEFAULT 0 CHECK (all_day IN (0, 1))",
 }
 
+USERS_NEW_COLUMNS = {
+    # V0.10C: defaults every existing row (including the pre-existing
+    # bootstrap owner) to non-admin; _migrate_bootstrap_owner_admin below
+    # is the one-time exception that promotes the owner specifically.
+    "is_admin": "INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1))",
+}
+
 
 def _migrate_table(conn, table, new_columns):
     existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -52,6 +59,7 @@ def _migrate_table(conn, table, new_columns):
 def _migrate(conn):
     _migrate_table(conn, "events", NEW_COLUMNS)
     _migrate_table(conn, "event_review_candidates", REVIEW_CANDIDATE_NEW_COLUMNS)
+    _migrate_table(conn, "users", USERS_NEW_COLUMNS)
 
 
 USER_EVENT_STATUS_MIGRATION_NAME = "v0_10a_bootstrap_user_event_status"
@@ -95,11 +103,39 @@ def _migrate_user_event_status(conn):
         raise
 
 
+BOOTSTRAP_OWNER_ADMIN_MIGRATION_NAME = "v0_10c_bootstrap_owner_admin"
+
+
+def _migrate_bootstrap_owner_admin(conn):
+    """V0.10C: the bootstrap owner becomes admin. This is the ONE other
+    place (besides get_or_create_bootstrap_owner's own INSERT) allowed to
+    grant is_admin by matching BOOTSTRAP_OWNER_EMAIL - every other
+    authorization check in the app must use the is_admin column, never
+    infer admin from an email address. Guarded by its own marker and
+    transactional, same discipline as _migrate_user_event_status."""
+    if _migration_applied(conn, BOOTSTRAP_OWNER_ADMIN_MIGRATION_NAME):
+        return
+    try:
+        conn.execute(
+            "UPDATE users SET is_admin = 1, updated_at = datetime('now') WHERE email = ?",
+            (BOOTSTRAP_OWNER_EMAIL,),
+        )
+        conn.execute(
+            "INSERT INTO app_migrations (name, applied_at) VALUES (?, datetime('now'))",
+            (BOOTSTRAP_OWNER_ADMIN_MIGRATION_NAME,),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def init_db():
     DB_PATH.parent.mkdir(exist_ok=True)
     conn = get_db()
     conn.executescript(SCHEMA_PATH.read_text())
     _migrate(conn)
     _migrate_user_event_status(conn)
+    _migrate_bootstrap_owner_admin(conn)
     conn.commit()
     conn.close()

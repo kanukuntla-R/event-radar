@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Event Radar - Log in</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Event Radar</h1>
+  </header>
+
+  <main class="login-page">
+    <h2>Log in</h2>
+    {% if error %}<div class="proposal-error">{{ error }}</div>{% endif %}
+    <form method="post" action="{{ url_for('login') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+      <label>Email <input type="email" name="email" required autofocus></label>
+      <label>Password <input type="password" name="password" required></label>
+      <button type="submit">Log in</button>
+    </form>
+  </main>
+</body>
+</html>

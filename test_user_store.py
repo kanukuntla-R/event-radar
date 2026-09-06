@@ -11,8 +11,9 @@ from unittest.mock import patch
 
 from user_store import (
     BOOTSTRAP_OWNER_EMAIL, BOOTSTRAP_OWNER_DISPLAY_NAME,
-    get_user_by_email, get_or_create_bootstrap_owner,
+    get_user_by_email, get_user_by_id, get_or_create_bootstrap_owner,
     get_user_event_status, set_user_event_status, create_calendar_token,
+    normalize_email, create_user, set_user_password, verify_user_password,
 )
 
 SCHEMA_SQL = (Path(__file__).parent / "schema.sql").read_text()
@@ -68,6 +69,10 @@ class BootstrapOwnerTests(unittest.TestCase):
         self.assertEqual(user["display_name"], BOOTSTRAP_OWNER_DISPLAY_NAME)
         self.assertIsNone(user["password_hash"])
 
+    def test_freshly_created_owner_is_admin(self):
+        user = get_or_create_bootstrap_owner(self.conn)
+        self.assertEqual(user["is_admin"], 1)
+
     def test_is_idempotent(self):
         first = get_or_create_bootstrap_owner(self.conn)
         second = get_or_create_bootstrap_owner(self.conn)
@@ -88,6 +93,139 @@ class BootstrapOwnerTests(unittest.TestCase):
         get_or_create_bootstrap_owner(self.conn)
         self.conn.rollback()
         self.assertIsNone(get_user_by_email(self.conn, BOOTSTRAP_OWNER_EMAIL))
+
+
+class EmailNormalizationTests(unittest.TestCase):
+    def test_lowercases(self):
+        self.assertEqual(normalize_email("User@Example.com"), "user@example.com")
+
+    def test_strips_whitespace(self):
+        self.assertEqual(normalize_email("  user@example.com  "), "user@example.com")
+
+    def test_lookup_is_case_and_whitespace_insensitive(self):
+        conn = _make_conn()
+        try:
+            create_user(conn, "Friend@Example.com", "s3cret-pass")
+            conn.commit()
+            self.assertIsNotNone(get_user_by_email(conn, "  friend@example.com  "))
+        finally:
+            conn.close()
+
+
+class CreateUserTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = _make_conn()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_creates_normalized_non_admin_user(self):
+        user = create_user(self.conn, "Friend@Example.com", "s3cret-pass")
+        self.assertEqual(user["email"], "friend@example.com")
+        self.assertEqual(user["is_admin"], 0)
+
+    def test_password_is_hashed_not_plaintext(self):
+        user = create_user(self.conn, "friend@example.com", "s3cret-pass")
+        self.assertIsNotNone(user["password_hash"])
+        self.assertNotIn("s3cret-pass", user["password_hash"])
+
+    def test_can_create_admin_explicitly(self):
+        user = create_user(self.conn, "admin2@example.com", "s3cret-pass", is_admin=True)
+        self.assertEqual(user["is_admin"], 1)
+
+    def test_duplicate_normalized_email_rejected(self):
+        create_user(self.conn, "friend@example.com", "s3cret-pass")
+        with self.assertRaises(ValueError):
+            create_user(self.conn, "Friend@Example.com ", "other-pass")
+        count = self.conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_does_not_commit_internally(self):
+        create_user(self.conn, "friend@example.com", "s3cret-pass")
+        self.conn.rollback()
+        self.assertIsNone(get_user_by_email(self.conn, "friend@example.com"))
+
+
+class SetUserPasswordTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = _make_conn()
+        self.user = create_user(self.conn, "friend@example.com", "old-pass")
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_updates_hash(self):
+        old_hash = self.user["password_hash"]
+        set_user_password(self.conn, self.user["id"], "new-pass")
+        row = get_user_by_id(self.conn, self.user["id"])
+        self.assertNotEqual(row["password_hash"], old_hash)
+
+    def test_can_activate_a_null_hash_account(self):
+        owner = get_or_create_bootstrap_owner(self.conn)
+        self.conn.commit()
+        self.assertIsNone(owner["password_hash"])
+        set_user_password(self.conn, owner["id"], "new-owner-pass")
+        row = get_user_by_id(self.conn, owner["id"])
+        self.assertIsNotNone(row["password_hash"])
+
+    def test_rejects_nonexistent_user(self):
+        with self.assertRaises(ValueError):
+            set_user_password(self.conn, self.user["id"] + 999, "new-pass")
+
+    def test_does_not_commit_internally(self):
+        set_user_password(self.conn, self.user["id"], "new-pass")
+        self.conn.rollback()
+        row = get_user_by_id(self.conn, self.user["id"])
+        self.assertEqual(row["password_hash"], self.user["password_hash"])
+
+
+class VerifyUserPasswordTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = _make_conn()
+        self.user = create_user(self.conn, "friend@example.com", "correct-pass")
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_correct_password_succeeds(self):
+        result = verify_user_password(self.conn, "friend@example.com", "correct-pass")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], self.user["id"])
+
+    def test_wrong_password_fails(self):
+        self.assertIsNone(verify_user_password(self.conn, "friend@example.com", "wrong-pass"))
+
+    def test_nonexistent_email_fails(self):
+        self.assertIsNone(verify_user_password(self.conn, "nobody@example.com", "whatever"))
+
+    def test_null_password_hash_cannot_authenticate(self):
+        owner = get_or_create_bootstrap_owner(self.conn)
+        self.conn.commit()
+        self.assertIsNone(verify_user_password(self.conn, owner["email"], ""))
+        self.assertIsNone(verify_user_password(self.conn, owner["email"], "anything"))
+
+    def test_email_lookup_is_normalized(self):
+        result = verify_user_password(self.conn, "  Friend@Example.com  ", "correct-pass")
+        self.assertIsNotNone(result)
+
+
+class GetUserByIdTests(unittest.TestCase):
+    def test_returns_user(self):
+        conn = _make_conn()
+        try:
+            user = create_user(conn, "friend@example.com", "s3cret-pass")
+            self.assertEqual(get_user_by_id(conn, user["id"])["email"], "friend@example.com")
+        finally:
+            conn.close()
+
+    def test_returns_none_for_missing(self):
+        conn = _make_conn()
+        try:
+            self.assertIsNone(get_user_by_id(conn, 99999))
+        finally:
+            conn.close()
 
 
 class UserEventStatusTests(unittest.TestCase):

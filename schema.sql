@@ -140,9 +140,21 @@ CREATE TABLE IF NOT EXISTS users (
     email TEXT NOT NULL UNIQUE,
     display_name TEXT,
     password_hash TEXT,
+    -- V0.10C: bootstrap owner => 1, every other account defaults to 0.
+    -- Never inferred from email/numeric id at authorization time - only
+    -- the one-time db.py migration for the pre-existing bootstrap owner,
+    -- and get_or_create_bootstrap_owner() itself, are allowed to set this
+    -- by matching the known bootstrap owner email.
+    is_admin INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- V0.10C: case-insensitive email identity. A declarative expression index
+-- fails loudly (UNIQUE constraint violation) if an existing database
+-- already has two rows differing only by case/whitespace - that's the
+-- desired behavior (fail clearly, never silently merge accounts).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower ON users (lower(email));
 
 -- Per-user event status. events.status is legacy single-user state, kept
 -- temporarily for compatibility; this table is the future source of

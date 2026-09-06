@@ -130,6 +130,47 @@ none was added.
 `http://100.86.220.80:5000/calendar.ics` (or whatever address/port the
 existing subscription already uses - unchanged by this phase).
 
+## Authentication deployment (V0.10C)
+
+The web service now needs a persistent `EVENT_RADAR_SECRET_KEY` (Flask
+session signing) supplied via an `EnvironmentFile=`, and the bootstrap
+owner needs a real password before login can work at all.
+
+**1. Generate the secret** (safe to run any time - never rotates an
+existing secret, never prints the value):
+
+```bash
+deploy/generate-secret.sh
+```
+
+This creates `~/.config/event-radar/secret.env` (mode `0600`, directory
+mode `0700`) containing `EVENT_RADAR_SECRET_KEY=<64 hex chars>`.
+
+**2. Set the bootstrap owner's password** (interactive - never pass a
+password as a CLI argument):
+
+```bash
+.venv/bin/python user_admin.py set-password --email owner@event-radar.local
+```
+
+**3. Install the updated unit and restart**:
+
+```bash
+deploy/install-user-units.sh
+systemctl --user restart event-radar-web.service
+```
+
+Until steps 1-3 are all done, the owner's `password_hash` stays `NULL`
+and login is impossible - restarting onto V0.10C code before setting a
+password would lock out the dashboard (the legacy `/calendar.ics` feed
+would keep working regardless, since it's intentionally unauthenticated
+for this transition phase - see `app.py`'s `calendar_ics()`).
+
+**Cookie security**: `SESSION_COOKIE_SECURE` is off by default (this
+deployment is HTTP over trusted Tailscale/LAN - a Secure cookie simply
+wouldn't be sent). Set `EVENT_RADAR_FORCE_SECURE_COOKIES=1` in
+`secret.env` before ever deploying behind HTTPS/public Cloudflare.
+
 ## Repo-tracked source of truth
 
 `deploy/systemd/*.service` and `*.timer` are the canonical, git-tracked

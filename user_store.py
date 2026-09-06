@@ -7,6 +7,8 @@ import secrets
 import sqlite3
 from datetime import datetime, timezone
 
+from werkzeug.security import generate_password_hash, check_password_hash
+
 BOOTSTRAP_OWNER_EMAIL = "owner@event-radar.local"
 BOOTSTRAP_OWNER_DISPLAY_NAME = "Owner"
 
@@ -17,8 +19,22 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def normalize_email(email):
+    """Application-level email identity: strip surrounding whitespace and
+    lowercase. schema.sql also enforces this at the DB level via a unique
+    index on lower(email), so a caller that skips this still can't create
+    a case-variant duplicate - it just gets a clearer error here first."""
+    return email.strip().lower()
+
+
 def get_user_by_email(conn, email):
-    return conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    return conn.execute(
+        "SELECT * FROM users WHERE email = ?", (normalize_email(email),)
+    ).fetchone()
+
+
+def get_user_by_id(conn, user_id):
+    return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
 
 
 def _user_exists(conn, user_id):
@@ -45,11 +61,53 @@ def get_or_create_bootstrap_owner(conn):
         return existing
     now = _now()
     conn.execute(
-        "INSERT INTO users (email, display_name, password_hash, created_at, updated_at) "
-        "VALUES (?, ?, NULL, ?, ?)",
+        "INSERT INTO users (email, display_name, password_hash, is_admin, created_at, updated_at) "
+        "VALUES (?, ?, NULL, 1, ?, ?)",
         (BOOTSTRAP_OWNER_EMAIL, BOOTSTRAP_OWNER_DISPLAY_NAME, now, now),
     )
     return get_user_by_email(conn, BOOTSTRAP_OWNER_EMAIL)
+
+
+def create_user(conn, email, password, display_name=None, is_admin=False):
+    """Creates a regular (non-admin by default) account with a hashed
+    password. Does NOT commit - caller owns the transaction. Rejects a
+    duplicate normalized email clearly instead of relying solely on the
+    DB's unique index to raise a raw IntegrityError."""
+    normalized = normalize_email(email)
+    if get_user_by_email(conn, normalized) is not None:
+        raise ValueError(f"A user with email {normalized!r} already exists")
+    now = _now()
+    conn.execute(
+        "INSERT INTO users (email, display_name, password_hash, is_admin, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (normalized, display_name, generate_password_hash(password), 1 if is_admin else 0, now, now),
+    )
+    return get_user_by_email(conn, normalized)
+
+
+def set_user_password(conn, user_id, password):
+    """Hashes and stores a new password for an existing user (including
+    one whose password_hash is currently NULL, i.e. account activation).
+    Does NOT commit - caller owns the transaction."""
+    if not _user_exists(conn, user_id):
+        raise ValueError(f"No such user: {user_id!r}")
+    conn.execute(
+        "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+        (generate_password_hash(password), _now(), user_id),
+    )
+
+
+def verify_user_password(conn, email, password):
+    """Returns the user row on success, or None on any failure - wrong
+    password, nonexistent email, or a NULL password_hash (an account that
+    has never been activated can never authenticate, regardless of what
+    password is tried)."""
+    user = get_user_by_email(conn, email)
+    if user is None or user["password_hash"] is None:
+        return None
+    if not check_password_hash(user["password_hash"], password):
+        return None
+    return user
 
 
 def get_user_event_status(conn, user_id, event_id):

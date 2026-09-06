@@ -22,6 +22,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UNIT_SRC_DIR="$SCRIPT_DIR/systemd"
 UNIT_DEST_DIR="$HOME/.config/systemd/user"
 
+# event-radar-web.service references EnvironmentFile=%h/.config/event-radar/secret.env
+# (V0.10C) - ensure that secret exists (generating it once if missing, never
+# rotating it) before installing that unit. `set -e` above means this
+# script stops immediately, with a clear non-zero exit, if generation fails.
+"$SCRIPT_DIR/generate-secret.sh"
+
 mkdir -p "$UNIT_DEST_DIR"
 
 shopt -s nullglob

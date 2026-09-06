@@ -614,6 +614,241 @@ class MigrationMarkerTests(TempDbTestCase):
         self.assertEqual(status, "interested")
 
 
+# The full pre-V0.10C schema (V0.10A/B shape: users has no is_admin
+# column, no lower(email) unique index) - used to simulate migrating the
+# actual currently-live installation forward.
+PRE_V0_10C_SCHEMA = PRE_V0_10A_SCHEMA + """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    password_hash TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS user_event_status (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    event_id INTEGER NOT NULL REFERENCES events(id),
+    status TEXT NOT NULL CHECK (status IN ('new', 'interested', 'watching', 'ignored')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, event_id)
+);
+
+CREATE TABLE IF NOT EXISTS calendar_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    token TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS app_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+"""
+
+
+class _FailOnAdminMarkerConn:
+    """Wraps a real connection but fails the admin-role migration's own
+    marker INSERT - proves that failure can't leave a false marker."""
+
+    def __init__(self, real_conn):
+        self._real = real_conn
+
+    def execute(self, sql, params=()):
+        if "INSERT INTO app_migrations" in sql and db_module.BOOTSTRAP_OWNER_ADMIN_MIGRATION_NAME in params:
+            raise sqlite3.OperationalError("simulated failure")
+        return self._real.execute(sql, params)
+
+    def commit(self):
+        self._real.commit()
+
+    def rollback(self):
+        self._real.rollback()
+
+
+class AdminRoleMigrationTests(TempDbTestCase):
+    """V0.10C: the bootstrap owner becomes admin via a one-time,
+    email-matched migration - the only place outside
+    get_or_create_bootstrap_owner() allowed to grant admin by email."""
+
+    ADMIN_MARKER = db_module.BOOTSTRAP_OWNER_ADMIN_MIGRATION_NAME
+
+    def _seed_pre_v0_10c_db(self, events, owner_status="interested"):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(PRE_V0_10C_SCHEMA)
+        for event in events:
+            columns = ", ".join(event.keys())
+            placeholders = ", ".join(f":{k}" for k in event)
+            conn.execute(f"INSERT INTO events ({columns}) VALUES ({placeholders})", event)
+        conn.commit()
+        conn.close()
+
+    def test_fresh_db_owner_is_admin(self):
+        db_module.init_db()
+        conn = db_module.get_db()
+        owner = conn.execute(
+            "SELECT * FROM users WHERE email = 'owner@event-radar.local'"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(owner["is_admin"], 1)
+
+    def test_old_db_owner_becomes_admin(self):
+        self._seed_pre_v0_10c_db([{"name": "A", "status": "interested"}])
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        owner = conn.execute(
+            "SELECT * FROM users WHERE email = 'owner@event-radar.local'"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(owner["is_admin"], 1)
+
+    def test_migration_preserves_owner_statuses_and_events(self):
+        self._seed_pre_v0_10c_db([
+            {"name": "A", "status": "interested"},
+            {"name": "B", "status": "watching"},
+        ])
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        owner_id = conn.execute("SELECT id FROM users WHERE email = 'owner@event-radar.local'").fetchone()["id"]
+        rows = conn.execute(
+            "SELECT e.name, ues.status FROM events e "
+            "JOIN user_event_status ues ON ues.event_id = e.id AND ues.user_id = ?",
+            (owner_id,),
+        ).fetchall()
+        event_count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        conn.close()
+        self.assertEqual({row["name"]: row["status"] for row in rows}, {"A": "interested", "B": "watching"})
+        self.assertEqual(event_count, 2)
+
+    def test_does_not_invent_password(self):
+        self._seed_pre_v0_10c_db([{"name": "A", "status": "interested"}])
+        db_module.init_db()
+        conn = db_module.get_db()
+        owner = conn.execute("SELECT * FROM users WHERE email = 'owner@event-radar.local'").fetchone()
+        conn.close()
+        self.assertIsNone(owner["password_hash"])
+
+    def test_does_not_create_calendar_token(self):
+        self._seed_pre_v0_10c_db([{"name": "A", "status": "interested"}])
+        db_module.init_db()
+        conn = db_module.get_db()
+        count = conn.execute("SELECT COUNT(*) FROM calendar_tokens").fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 0)
+
+    def test_migration_is_idempotent(self):
+        self._seed_pre_v0_10c_db([{"name": "A", "status": "interested"}])
+        db_module.init_db()
+        db_module.init_db()
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        owners = conn.execute("SELECT * FROM users WHERE email = 'owner@event-radar.local'").fetchall()
+        markers = conn.execute(
+            "SELECT * FROM app_migrations WHERE name = ?", (self.ADMIN_MARKER,)
+        ).fetchall()
+        conn.close()
+        self.assertEqual(len(owners), 1)
+        self.assertEqual(len(markers), 1)
+
+    def test_does_not_grant_admin_to_non_owner_accounts(self):
+        self._seed_pre_v0_10c_db([{"name": "A", "status": "interested"}])
+        db_module.init_db()
+
+        conn = db_module.get_db()
+        from user_store import create_user
+        friend = create_user(conn, "friend@example.com", "s3cret-pass")
+        conn.commit()
+        conn.close()
+
+        db_module.init_db()  # rerun must not touch the friend account
+
+        conn = db_module.get_db()
+        row = conn.execute("SELECT is_admin FROM users WHERE id = ?", (friend["id"],)).fetchone()
+        conn.close()
+        self.assertEqual(row["is_admin"], 0)
+
+    def test_transaction_failure_cannot_leave_false_migration_completion(self):
+        # Simulate a genuinely pre-V0.10C owner row: created back when
+        # get_or_create_bootstrap_owner didn't set is_admin at all, so the
+        # users-table migration's ALTER TABLE ... DEFAULT 0 left it at 0.
+        self._seed_pre_v0_10c_db([{"name": "A", "status": "interested"}])
+        conn = db_module.get_db()
+        conn.executescript(SCHEMA_PATH_TEXT)
+        db_module._migrate(conn)
+        conn.execute(
+            "INSERT INTO users (email, display_name, password_hash, is_admin, created_at, updated_at) "
+            "VALUES (?, 'Owner', NULL, 0, datetime('now'), datetime('now'))",
+            (db_module.BOOTSTRAP_OWNER_EMAIL,),
+        )
+        conn.commit()
+        flaky = _FailOnAdminMarkerConn(conn)
+
+        with self.assertRaises(sqlite3.OperationalError):
+            db_module._migrate_bootstrap_owner_admin(flaky)
+
+        owner = conn.execute("SELECT * FROM users WHERE email = 'owner@event-radar.local'").fetchone()
+        marker = conn.execute(
+            "SELECT * FROM app_migrations WHERE name = ?", (self.ADMIN_MARKER,)
+        ).fetchone()
+        conn.close()
+        self.assertEqual(owner["is_admin"], 0, "a failed admin migration must not leave is_admin set")
+        self.assertIsNone(marker)
+
+
+class EmailUniquenessMigrationTests(TempDbTestCase):
+    """V0.10C: the lower(email) unique index must fail loudly rather than
+    silently merge/drop a conflicting pre-existing database."""
+
+    def test_conflicting_case_variant_emails_fail_clearly_instead_of_merging(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(PRE_V0_10C_SCHEMA)
+        conn.execute(
+            "INSERT INTO users (email, display_name, created_at, updated_at) "
+            "VALUES ('friend@example.com', 'Friend', datetime('now'), datetime('now'))"
+        )
+        conn.execute(
+            "INSERT INTO users (email, display_name, created_at, updated_at) "
+            "VALUES ('Friend@Example.com', 'Friend Dup', datetime('now'), datetime('now'))"
+        )
+        conn.commit()
+        conn.close()
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            db_module.init_db()
+
+        # Neither conflicting row was silently merged or deleted.
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        count = conn.execute("SELECT COUNT(*) FROM users WHERE email IN (?, ?)",
+                              ("friend@example.com", "Friend@Example.com")).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 2)
+
+    def test_non_conflicting_existing_db_migrates_cleanly(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(PRE_V0_10C_SCHEMA)
+        conn.execute(
+            "INSERT INTO users (email, display_name, created_at, updated_at) "
+            "VALUES ('friend@example.com', 'Friend', datetime('now'), datetime('now'))"
+        )
+        conn.commit()
+        conn.close()
+
+        db_module.init_db()  # must not raise
+
+        conn = db_module.get_db()
+        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 2)  # the seeded friend + bootstrap owner
+
+
 class SeedLifecycleTests(TempDbTestCase):
     def test_freshly_seeded_hackathons_default_to_active(self):
         seed_module.seed()

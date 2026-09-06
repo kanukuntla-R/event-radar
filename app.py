@@ -1,7 +1,8 @@
 import json
+import os
 from datetime import datetime
 
-from flask import Flask, render_template, redirect, url_for, Response, abort, request
+from flask import Flask, render_template, redirect, url_for, Response, abort, request, session, g
 
 from db import get_db, init_db
 from calendar_service import generate_ics
@@ -9,7 +10,11 @@ from proposal_resolver import accept_proposal, dismiss_proposal, StaleProposalEr
 from source_health import classify_source_health
 from source_recovery_resolver import accept_recovery_candidate, dismiss_recovery_candidate
 from event_review_resolver import accept_review_candidate, dismiss_review_candidate
-from user_store import get_or_create_bootstrap_owner, set_user_event_status
+from user_store import get_or_create_bootstrap_owner, set_user_event_status, verify_user_password
+from auth import (
+    load_current_user, login_required, admin_required,
+    generate_csrf_token, enforce_csrf, is_safe_next_url,
+)
 
 # Explicit column list for the dashboard query - events.status is legacy
 # single-user state (V0.10A/B) and must NOT be selected alongside the
@@ -29,6 +34,39 @@ _EVENT_COLUMNS_EXCEPT_LEGACY_STATUS = ", ".join(
 )
 
 app = Flask(__name__)
+
+# V0.10C: session signing key. Must be a durable, cryptographically random
+# value from the environment - never hardcoded, never regenerated per
+# process start (that would invalidate every session on every restart),
+# and never given a development fallback here (a fallback would make it
+# trivially easy to accidentally run "production" with a guessable key).
+# Fails immediately at import/startup if unset, rather than letting
+# Gunicorn boot successfully and only failing deep in Flask's session
+# machinery on the first request that touches it - see
+# deploy/generate-secret.sh and deploy/systemd/README.md for how the live
+# service provides this via an EnvironmentFile. Tests set this same
+# environment variable to a fixed test value *before* importing this
+# module (see test_app.py) - exactly like a real deployment, just with a
+# throwaway value.
+app.secret_key = os.environ.get("EVENT_RADAR_SECRET_KEY")
+if not app.secret_key:
+    raise RuntimeError(
+        "EVENT_RADAR_SECRET_KEY is not set. Flask session signing needs a "
+        "persistent secret - see deploy/generate-secret.sh and "
+        "deploy/systemd/README.md. Refusing to start."
+    )
+
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+# Current deployment is HTTP over trusted Tailscale/LAN only - forcing
+# Secure here would make the browser stop sending the cookie entirely.
+# MUST be set to true (EVENT_RADAR_FORCE_SECURE_COOKIES=1) before any
+# HTTPS/public-Cloudflare deployment.
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("EVENT_RADAR_FORCE_SECURE_COOKIES") == "1"
+
+app.before_request(load_current_user)
+app.before_request(enforce_csrf)
+app.jinja_env.globals["csrf_token"] = generate_csrf_token
 
 ACTION_TO_STATUS = {
     "interested": "interested",
@@ -138,12 +176,12 @@ def format_review_date(row):
     return _format_date_time_label(row["start_date"], row["start_time"], row["end_date"], row["end_time"])
 
 
-def _load_dashboard_events(conn):
-    """V0.10B: `status` for the bootstrap owner comes from
-    user_event_status.status, not the legacy events.status column - a
-    missing row (an event no one has acted on yet) reads as 'new'."""
-    owner = get_or_create_bootstrap_owner(conn)
-    conn.commit()  # get_or_create_bootstrap_owner doesn't commit itself
+def _load_dashboard_events(conn, user_id):
+    """V0.10C: `status` comes from user_event_status.status for the
+    CURRENTLY AUTHENTICATED user - never the bootstrap owner, never the
+    legacy events.status column. A missing row (an event this user hasn't
+    acted on yet) reads as 'new'. Two users can hold different statuses
+    for the same shared event without interfering with each other."""
     return conn.execute(
         f"SELECT {_EVENT_COLUMNS_EXCEPT_LEGACY_STATUS}, "
         "COALESCE(ues.status, 'new') AS status "
@@ -151,7 +189,7 @@ def _load_dashboard_events(conn):
         "LEFT JOIN user_event_status ues ON ues.event_id = e.id AND ues.user_id = ? "
         "ORDER BY e.event_state = 'inactive', COALESCE(ues.status, 'new') = 'ignored', "
         "e.start_date IS NULL, e.start_date, e.name",
-        (owner["id"],),
+        (user_id,),
     ).fetchall()
 
 
@@ -185,7 +223,7 @@ def _load_pending_reviews(conn):
 
 def _render_dashboard(error=None):
     conn = get_db()
-    events = _load_dashboard_events(conn)
+    events = _load_dashboard_events(conn, g.user["id"])
     proposals_by_event = _load_pending_proposals(conn)
     recovery_by_event = _load_pending_recovery_candidates(conn)
     reviews = _load_pending_reviews(conn)
@@ -197,22 +235,51 @@ def _render_dashboard(error=None):
 
 
 @app.route("/")
+@login_required
 def index():
     return _render_dashboard()
 
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if g.user is not None:
+        return redirect(url_for("index"))
+    next_url = request.values.get("next", "")
+    if not is_safe_next_url(next_url):
+        next_url = ""
+    if request.method == "POST":
+        conn = get_db()
+        user = verify_user_password(conn, request.form.get("email", ""), request.form.get("password", ""))
+        conn.close()
+        if user is None:
+            return render_template("login.html", error="Invalid email or password.", next=next_url), 401
+        session.clear()  # drop any pre-login session state, including its CSRF token
+        session["user_id"] = user["id"]
+        generate_csrf_token()  # fresh token bound to the new authenticated session
+        return redirect(next_url or url_for("index"))
+    return render_template("login.html", error=None, next=next_url)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
 @app.route("/event/<int:event_id>/<action>", methods=["POST"])
+@login_required
 def set_status(event_id, action):
-    """V0.10B: writes only user_event_status for the bootstrap owner -
-    events.status (legacy) is never modified here. A nonexistent event_id
-    is a no-op (same as the old UPDATE ... WHERE id=? matching zero rows)."""
+    """V0.10C: writes only user_event_status for the CURRENTLY
+    AUTHENTICATED user - never a bootstrap-owner fallback, never legacy
+    events.status. One user's request can never touch another user's
+    row (the write is always scoped to g.user["id"]). A nonexistent
+    event_id is a no-op (same as the old UPDATE ... WHERE id=? matching
+    zero rows)."""
     if action not in ACTION_TO_STATUS:
         abort(404)
     conn = get_db()
-    owner = get_or_create_bootstrap_owner(conn)
-    conn.commit()  # get_or_create_bootstrap_owner doesn't commit itself
     try:
-        set_user_event_status(conn, owner["id"], event_id, ACTION_TO_STATUS[action])
+        set_user_event_status(conn, g.user["id"], event_id, ACTION_TO_STATUS[action])
     except ValueError:
         pass
     conn.close()
@@ -220,6 +287,7 @@ def set_status(event_id, action):
 
 
 @app.route("/event/<int:event_id>/inactive", methods=["POST"])
+@admin_required
 def mark_inactive_route(event_id):
     reason = request.form.get("inactive_reason", "manual")
     if reason not in INACTIVE_REASONS:
@@ -236,6 +304,7 @@ def mark_inactive_route(event_id):
 
 
 @app.route("/event/<int:event_id>/reactivate", methods=["POST"])
+@admin_required
 def reactivate_route(event_id):
     conn = get_db()
     conn.execute(
@@ -249,6 +318,7 @@ def reactivate_route(event_id):
 
 
 @app.route("/proposal/<int:proposal_id>/accept", methods=["POST"])
+@admin_required
 def accept_proposal_route(proposal_id):
     conn = get_db()
     try:
@@ -264,6 +334,7 @@ def accept_proposal_route(proposal_id):
 
 
 @app.route("/proposal/<int:proposal_id>/dismiss", methods=["POST"])
+@admin_required
 def dismiss_proposal_route(proposal_id):
     conn = get_db()
     try:
@@ -276,6 +347,7 @@ def dismiss_proposal_route(proposal_id):
 
 
 @app.route("/source-recovery/<int:candidate_id>/accept", methods=["POST"])
+@admin_required
 def accept_recovery_candidate_route(candidate_id):
     conn = get_db()
     try:
@@ -288,6 +360,7 @@ def accept_recovery_candidate_route(candidate_id):
 
 
 @app.route("/source-recovery/<int:candidate_id>/dismiss", methods=["POST"])
+@admin_required
 def dismiss_recovery_candidate_route(candidate_id):
     conn = get_db()
     try:
@@ -300,6 +373,7 @@ def dismiss_recovery_candidate_route(candidate_id):
 
 
 @app.route("/review/<int:review_id>/accept", methods=["POST"])
+@admin_required
 def accept_review_route(review_id):
     conn = get_db()
     try:
@@ -312,6 +386,7 @@ def accept_review_route(review_id):
 
 
 @app.route("/review/<int:review_id>/dismiss", methods=["POST"])
+@admin_required
 def dismiss_review_route(review_id):
     conn = get_db()
     try:
@@ -325,10 +400,20 @@ def dismiss_review_route(review_id):
 
 @app.route("/calendar.ics")
 def calendar_ics():
-    """V0.10B: reflects the bootstrap owner's user_event_status, never the
-    legacy events.status column. A plain JOIN (not LEFT JOIN) naturally
-    excludes an event with no user_event_status row - missing means
-    effective status 'new', which must never appear on the calendar."""
+    """TEMPORARY LEGACY BEHAVIOR - REMOVE/REPLACE IN V0.10D.
+
+    Deliberately unauthenticated: Apple Calendar's ICS subscription
+    fetcher cannot participate in the browser login session, so for this
+    transition phase this feed keeps serving the bootstrap owner's own
+    Interested + active events specifically - never "whichever browser
+    user happens to be logged in" (there is no logged-in user for this
+    request at all). V0.10D replaces this with private per-user
+    calendar_tokens URLs and removes this unauthenticated route.
+
+    Reflects user_event_status, never the legacy events.status column. A
+    plain JOIN (not LEFT JOIN) naturally excludes an event with no
+    user_event_status row - missing means effective status 'new', which
+    must never appear on the calendar."""
     conn = get_db()
     owner = get_or_create_bootstrap_owner(conn)
     conn.commit()  # get_or_create_bootstrap_owner doesn't commit itself

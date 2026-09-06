@@ -5,6 +5,10 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/home/kanukuntla-r/workspace/event-radar
+# V0.10C: EVENT_RADAR_SECRET_KEY (Flask session signing) - generated once
+# by deploy/generate-secret.sh, never rotated by a reinstall. See
+# deploy/systemd/README.md for the full auth deployment sequence.
+EnvironmentFile=%h/.config/event-radar/secret.env
 # 1 worker process (no SQLite multi-process contention beyond the existing
 # flock-serialized maintenance jobs) with 2 threads (gthread) for light
 # request concurrency - each request opens/closes its own sqlite3
