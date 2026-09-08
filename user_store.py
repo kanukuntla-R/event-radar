@@ -121,6 +121,22 @@ def get_user_event_status(conn, user_id, event_id):
     return row["status"] if row else None
 
 
+def delete_user_event_status(conn, user_id, event_id):
+    """V0.11.1: reverts a user to the implicit 'new' state for an event by
+    removing their user_event_status row entirely - New is represented ONLY
+    by a missing row, never by an explicit status='new' row (the CHECK
+    constraint still permits 'new' for backward compatibility with rows a
+    prior version may have written, but nothing writes it anymore). Scoped
+    by BOTH user_id and event_id, so this can never remove another user's
+    row for the same shared event. Idempotent - a no-op if no row exists,
+    including for a nonexistent user_id or event_id."""
+    conn.execute(
+        "DELETE FROM user_event_status WHERE user_id = ? AND event_id = ?",
+        (user_id, event_id),
+    )
+    conn.commit()
+
+
 def set_user_event_status(conn, user_id, event_id, status):
     """Insert-or-update a user's status for an event. Never touches
     events.status. Preserves created_at across updates."""

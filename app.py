@@ -11,7 +11,7 @@ from source_health import classify_source_health
 from source_recovery_resolver import accept_recovery_candidate, dismiss_recovery_candidate
 from event_review_resolver import accept_review_candidate, dismiss_review_candidate
 from user_store import (
-    set_user_event_status, verify_user_password,
+    set_user_event_status, delete_user_event_status, verify_user_password,
     get_active_calendar_token_for_user, create_calendar_token,
     rotate_calendar_token, revoke_calendar_token, get_user_for_calendar_token,
 )
@@ -77,6 +77,12 @@ ACTION_TO_STATUS = {
     "watching": "watching",
     "ignore": "ignored",
 }
+
+# V0.11.1: "new" is a distinct action from ACTION_TO_STATUS's set/update
+# actions - it deletes the user_event_status row rather than upserting an
+# explicit status='new' row. New is represented ONLY by a missing row (see
+# delete_user_event_status in user_store.py).
+REVERT_TO_NEW_ACTIONS = {"new"}
 
 INACTIVE_REASONS = {"canceled", "removed", "source_missing", "finished", "manual"}
 
@@ -180,21 +186,108 @@ def format_review_date(row):
     return _format_date_time_label(row["start_date"], row["start_time"], row["end_date"], row["end_time"])
 
 
-def _load_dashboard_events(conn, user_id):
+DASHBOARD_FILTER_KEYS = ("q", "status", "source", "type", "location_type", "sort")
+
+_SORT_OPTIONS = {
+    "upcoming": "e.event_state = 'inactive', effective_status = 'ignored', "
+                "e.start_date IS NULL, e.start_date, e.name",
+    "recent": "e.first_seen DESC, e.id DESC",
+}
+
+
+def _load_dashboard_events(conn, user_id, q=None, status=None, source=None,
+                            event_type=None, location_type=None, sort="upcoming"):
     """V0.10C: `status` comes from user_event_status.status for the
     CURRENTLY AUTHENTICATED user - never the bootstrap owner, never the
     legacy events.status column. A missing row (an event this user hasn't
     acted on yet) reads as 'new'. Two users can hold different statuses
-    for the same shared event without interfering with each other."""
+    for the same shared event without interfering with each other.
+
+    V0.11: q/status/source/event_type/location_type narrow this same
+    per-user set further - search and every filter here can only narrow,
+    never widen, what this query would otherwise return."""
+    where = []
+    params = [user_id]
+    if status and status != "all":
+        where.append("COALESCE(ues.status, 'new') = ?")
+        params.append(status)
+    if source:
+        where.append("e.source = ?")
+        params.append(source)
+    if event_type:
+        where.append("e.event_type = ?")
+        params.append(event_type)
+    if location_type:
+        where.append("e.location_type = ?")
+        params.append(location_type)
+    if q:
+        needle = f"%{q.strip().lower()}%"
+        where.append(
+            "(lower(e.name) LIKE ? OR lower(COALESCE(e.description, '')) LIKE ? "
+            "OR lower(COALESCE(e.location, '')) LIKE ? OR lower(COALESCE(e.source, '')) LIKE ?)"
+        )
+        params.extend([needle, needle, needle, needle])
+
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    order_sql = _SORT_OPTIONS.get(sort, _SORT_OPTIONS["upcoming"])
     return conn.execute(
         f"SELECT {_EVENT_COLUMNS_EXCEPT_LEGACY_STATUS}, "
-        "COALESCE(ues.status, 'new') AS status "
+        "COALESCE(ues.status, 'new') AS status, "
+        "COALESCE(ues.status, 'new') AS effective_status "
         "FROM events e "
         "LEFT JOIN user_event_status ues ON ues.event_id = e.id AND ues.user_id = ? "
-        "ORDER BY e.event_state = 'inactive', COALESCE(ues.status, 'new') = 'ignored', "
-        "e.start_date IS NULL, e.start_date, e.name",
+        f"{where_sql} "
+        f"ORDER BY {order_sql}",
+        params,
+    ).fetchall()
+
+
+def _dashboard_summary_counts(conn, user_id):
+    """Per-user New/Interested/Watching/Ignored counts over the same
+    unfiltered per-user event set _load_dashboard_events(...) returns
+    with no filters - stays stable as the user narrows the view below."""
+    rows = conn.execute(
+        "SELECT COALESCE(ues.status, 'new') AS status, COUNT(*) AS n "
+        "FROM events e "
+        "LEFT JOIN user_event_status ues ON ues.event_id = e.id AND ues.user_id = ? "
+        "GROUP BY COALESCE(ues.status, 'new')",
         (user_id,),
     ).fetchall()
+    counts = {"new": 0, "interested": 0, "watching": 0, "ignored": 0}
+    for row in rows:
+        counts[row["status"]] = row["n"]
+    return counts
+
+
+def _dashboard_filter_choices(conn):
+    """Source/type/location-type dropdown options, populated from
+    whatever values currently exist in events - never hardcoded."""
+    def _distinct(col):
+        return sorted(
+            r[0] for r in conn.execute(
+                f"SELECT DISTINCT {col} FROM events WHERE {col} IS NOT NULL AND {col} != ''"
+            ).fetchall()
+        )
+    return {
+        "sources": _distinct("source"),
+        "event_types": _distinct("event_type"),
+        "location_types": _distinct("location_type"),
+    }
+
+
+def _dashboard_args_from(mapping):
+    """Whitelist-only extraction of dashboard filter/search/sort state from
+    a Flask MultiDict (request.args on GET, request.form on the
+    status-change POST). Never passes anything else through, so this can
+    never become an open-redirect vector regardless of what a client
+    sends - the caller only ever feeds the result into url_for('index',
+    **result), which always resolves to this app's own dashboard path."""
+    result = {}
+    for key in DASHBOARD_FILTER_KEYS:
+        value = (mapping.get(key) or "").strip()
+        if value:
+            result[key] = value
+    return result
 
 
 def _load_pending_proposals(conn):
@@ -227,7 +320,14 @@ def _load_pending_reviews(conn):
 
 def _render_dashboard(error=None):
     conn = get_db()
-    events = _load_dashboard_events(conn, g.user["id"])
+    filters = _dashboard_args_from(request.args)
+    events = _load_dashboard_events(
+        conn, g.user["id"], q=filters.get("q"), status=filters.get("status"),
+        source=filters.get("source"), event_type=filters.get("type"),
+        location_type=filters.get("location_type"), sort=filters.get("sort", "upcoming"),
+    )
+    summary = _dashboard_summary_counts(conn, g.user["id"])
+    choices = _dashboard_filter_choices(conn)
     proposals_by_event = _load_pending_proposals(conn)
     recovery_by_event = _load_pending_recovery_candidates(conn)
     reviews = _load_pending_reviews(conn)
@@ -235,6 +335,7 @@ def _render_dashboard(error=None):
     return render_template(
         "index.html", events=events, proposals_by_event=proposals_by_event,
         recovery_by_event=recovery_by_event, reviews=reviews, error=error,
+        summary=summary, choices=choices, filters=filters,
     )
 
 
@@ -278,16 +379,30 @@ def set_status(event_id, action):
     events.status. One user's request can never touch another user's
     row (the write is always scoped to g.user["id"]). A nonexistent
     event_id is a no-op (same as the old UPDATE ... WHERE id=? matching
-    zero rows)."""
-    if action not in ACTION_TO_STATUS:
+    zero rows).
+
+    V0.11: redirects back to whatever filtered/search dashboard view the
+    user was on, rebuilt entirely from a fixed whitelist of hidden form
+    fields (DASHBOARD_FILTER_KEYS) via url_for - never from a raw
+    client-supplied URL, so this can never become an open redirect.
+
+    V0.11.1: the "new" action is a DELETE of this user's row, scoped by
+    BOTH g.user["id"] and event_id - never an upsert of status='new'. New
+    is represented only by a missing row (see delete_user_event_status);
+    every dashboard read already treats a missing row as 'new' via
+    COALESCE(ues.status, 'new'), so this needs no other code to change."""
+    if action not in ACTION_TO_STATUS and action not in REVERT_TO_NEW_ACTIONS:
         abort(404)
     conn = get_db()
-    try:
-        set_user_event_status(conn, g.user["id"], event_id, ACTION_TO_STATUS[action])
-    except ValueError:
-        pass
+    if action in REVERT_TO_NEW_ACTIONS:
+        delete_user_event_status(conn, g.user["id"], event_id)
+    else:
+        try:
+            set_user_event_status(conn, g.user["id"], event_id, ACTION_TO_STATUS[action])
+        except ValueError:
+            pass
     conn.close()
-    return redirect(url_for("index"))
+    return redirect(url_for("index", **_dashboard_args_from(request.form)))
 
 
 @app.route("/event/<int:event_id>/inactive", methods=["POST"])

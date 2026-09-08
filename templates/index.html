@@ -20,157 +20,208 @@
 
   {% if error %}<div class="proposal-error">{{ error }}</div>{% endif %}
 
-  <table>
-    <thead>
-      <tr>
-        <th>Name</th>
-        <th>Type</th>
-        <th>Date</th>
-        <th>Location</th>
-        <th>Reg.</th>
-        <th>Status</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for e in events %}
-      {% set health = e | source_health %}
-      <tr class="status-{{ e['status'] }}{% if health.level == 'inactive' %} event-inactive{% endif %}">
-        <td>
-          {% if e['event_type'] == 'asu' %}
-          <div class="asu-tags">
-            <span class="badge badge-asu">ASU</span>
-            {% if e['event_subtype'] %}<span class="badge badge-subtype">{{ e['event_subtype'] | subtype_label }}</span>{% endif %}
-          </div>
-          {% endif %}
-          <strong>{{ e['name'] }}</strong>
-          {% if e['source_url'] %}<a href="{{ e['source_url'] }}" target="_blank" rel="noopener">source</a>{% endif %}
-          <div class="meta">
-            {%- if e['organizer'] %}{{ e['organizer'] }}{% endif -%}
-            {%- if e['organizer'] and e['travel_required'] is not none %} &middot; {% endif -%}
-            {%- if e['travel_required'] is not none -%}
-              {{ '✈ Travel' if e['travel_required'] else '🏠 Local' }}
-            {%- endif -%}
-            {%- if e['event_type'] == 'asu' and e['location_area'] -%}
-              {%- if e['organizer'] %} &middot; {% endif -%}{{ e['location_area'] | capitalize }}
-            {%- endif -%}
-          </div>
-          {% if e['description'] %}<div class="desc">{{ e['description'] }}</div>{% endif %}
-          {% if health.level == 'inactive' %}
-          <div class="source-health source-health-inactive">
-            Inactive{% if e['inactive_reason'] %} ({{ e['inactive_reason'] }}){% endif %}
-          </div>
-          {% elif health.level != 'healthy' %}
-          <div class="source-health source-health-{{ health.level }}">
-            {{ health.message }}
-            {% if e['last_successful_check'] %}<div class="source-health-detail">Last successful check: {{ e['last_successful_check'][:10] }}</div>{% endif %}
-          </div>
-          {% endif %}
-        </td>
-        <td>{{ e['event_type'] or '' }}</td>
-        <td>{{ e | event_date }}</td>
-        <td>
-          {{ e['location'] or '' }}
-          {% if e['location_type'] %}<span class="loc-type">({{ e['location_type'] }})</span>{% endif %}
-        </td>
-        <td><span class="badge reg-{{ e['registration_status'] or 'unknown' }}">{{ (e['registration_status'] or 'unknown').replace('_', ' ') }}</span></td>
-        <td>
-          <span class="badge badge-{{ e['status'] }}">{{ e['status'] }}</span>
-          {% if health.level == 'inactive' %}<span class="badge badge-inactive">inactive</span>{% endif %}
-        </td>
-        <td class="actions">
-          {% if health.level == 'inactive' %}
-            {% if g.user['is_admin'] %}
+  <div class="summary-tiles">
+    <div class="summary-tile">
+      <span class="summary-count" data-count-new="{{ summary.new }}">{{ summary.new }}</span>
+      <span class="summary-label">New</span>
+    </div>
+    <div class="summary-tile">
+      <span class="summary-count" data-count-interested="{{ summary.interested }}">{{ summary.interested }}</span>
+      <span class="summary-label">Interested</span>
+    </div>
+    <div class="summary-tile">
+      <span class="summary-count" data-count-watching="{{ summary.watching }}">{{ summary.watching }}</span>
+      <span class="summary-label">Watching</span>
+    </div>
+    <div class="summary-tile">
+      <span class="summary-count" data-count-ignored="{{ summary.ignored }}">{{ summary.ignored }}</span>
+      <span class="summary-label">Ignored</span>
+    </div>
+  </div>
+
+  <form method="get" action="{{ url_for('index') }}" class="filter-form">
+    <input type="search" name="q" placeholder="Search title, description, location, source" value="{{ filters.q or '' }}">
+    <select name="status">
+      <option value="all"{% if not filters.status or filters.status == 'all' %} selected{% endif %}>All statuses</option>
+      {% for key, label in (('new', 'New'), ('interested', 'Interested'), ('watching', 'Watching'), ('ignored', 'Ignored')) %}
+      <option value="{{ key }}"{% if filters.status == key %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <select name="source">
+      <option value="">All sources</option>
+      {% for s in choices.sources %}<option value="{{ s }}"{% if filters.source == s %} selected{% endif %}>{{ s }}</option>{% endfor %}
+    </select>
+    <select name="type">
+      <option value="">All types</option>
+      {% for t in choices.event_types %}<option value="{{ t }}"{% if filters.get('type') == t %} selected{% endif %}>{{ t }}</option>{% endfor %}
+    </select>
+    {% if choices.location_types %}
+    <select name="location_type">
+      <option value="">All locations</option>
+      {% for lt in choices.location_types %}<option value="{{ lt }}"{% if filters.location_type == lt %} selected{% endif %}>{{ lt }}</option>{% endfor %}
+    </select>
+    {% endif %}
+    <select name="sort">
+      <option value="upcoming"{% if filters.get('sort', 'upcoming') == 'upcoming' %} selected{% endif %}>Upcoming</option>
+      <option value="recent"{% if filters.get('sort') == 'recent' %} selected{% endif %}>Recently discovered</option>
+    </select>
+    <button type="submit">Apply</button>
+    {% if filters %}<a class="filter-clear" href="{{ url_for('index') }}">Clear</a>{% endif %}
+  </form>
+
+  <div class="event-list">
+    {% for e in events %}
+    {% set health = e | source_health %}
+    <div class="event-card status-{{ e['status'] }}{% if health.level == 'inactive' %} event-inactive{% endif %}">
+      <div class="event-card-header">
+        <h3 class="event-title">{{ e['name'] }}</h3>
+        <span class="badge badge-{{ e['status'] }}">{{ e['status'] }}</span>
+      </div>
+      <div class="event-datetime">{{ e | event_date }}</div>
+      {% if e['location'] or e['location_type'] %}
+      <div class="event-location">
+        {{ e['location'] or '' }}
+        {% if e['location_type'] %}<span class="badge badge-loc">{{ e['location_type'] }}</span>{% endif %}
+      </div>
+      {% endif %}
+      <div class="event-badges">
+        {% if e['event_type'] %}<span class="badge badge-type">{{ e['event_type'] }}</span>{% endif %}
+        {% if e['event_type'] == 'asu' %}<span class="badge badge-asu">ASU</span>{% endif %}
+        {% if e['event_subtype'] %}<span class="badge badge-subtype">{{ e['event_subtype'] | subtype_label }}</span>{% endif %}
+        {% if e['source'] %}<span class="badge badge-source">{{ e['source'] }}</span>{% endif %}
+        {% if e['source_url'] %}<a class="source-link" href="{{ e['source_url'] }}" target="_blank" rel="noopener">source</a>{% endif %}
+        <span class="badge reg-{{ e['registration_status'] or 'unknown' }}">{{ (e['registration_status'] or 'unknown').replace('_', ' ') }}</span>
+        {% if health.level == 'inactive' %}<span class="badge badge-inactive">inactive{% if e['inactive_reason'] %} ({{ e['inactive_reason'] }}){% endif %}</span>{% endif %}
+      </div>
+      {% if e['organizer'] or e['travel_required'] is not none or (e['event_type'] == 'asu' and e['location_area']) %}
+      <div class="meta">
+        {%- if e['organizer'] %}{{ e['organizer'] }}{% endif -%}
+        {%- if e['organizer'] and e['travel_required'] is not none %} &middot; {% endif -%}
+        {%- if e['travel_required'] is not none -%}
+          {{ '✈ Travel' if e['travel_required'] else '🏠 Local' }}
+        {%- endif -%}
+        {%- if e['event_type'] == 'asu' and e['location_area'] -%}
+          {%- if e['organizer'] %} &middot; {% endif -%}{{ e['location_area'] | capitalize }}
+        {%- endif -%}
+      </div>
+      {% endif %}
+      {% if e['description'] %}
+      <div class="desc">{{ e['description'][:200] }}{% if e['description']|length > 200 %}&hellip;{% endif %}</div>
+      {% endif %}
+      {% if health.level == 'inactive' %}
+      <div class="source-health source-health-inactive">
+        Inactive{% if e['inactive_reason'] %} ({{ e['inactive_reason'] }}){% endif %}
+      </div>
+      {% elif health.level != 'healthy' %}
+      <div class="source-health source-health-{{ health.level }}">
+        {{ health.message }}
+        {% if e['last_successful_check'] %}<div class="source-health-detail">Last successful check: {{ e['last_successful_check'][:10] }}</div>{% endif %}
+      </div>
+      {% endif %}
+
+      <div class="event-card-actions">
+        {% if health.level == 'inactive' %}
+          {% if g.user['is_admin'] %}
+          <div class="admin-actions">
             <form method="post" action="{{ url_for('reactivate_route', event_id=e['id']) }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button class="btn-reactivate">Reactivate</button>
             </form>
+          </div>
+          {% endif %}
+        {% else %}
+          <div class="user-actions">
+            <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='interested') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              {% for k, v in filters.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+              <button {% if e['status'] == 'interested' %}disabled{% endif %}>Interested</button>
+            </form>
+            <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='watching') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              {% for k, v in filters.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+              <button {% if e['status'] == 'watching' %}disabled{% endif %}>Watching</button>
+            </form>
+            <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='ignore') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              {% for k, v in filters.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+              <button {% if e['status'] == 'ignored' %}disabled{% endif %}>Ignore</button>
+            </form>
+            {% if e['status'] != 'new' %}
+            <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='new') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              {% for k, v in filters.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+              <button>New</button>
+            </form>
             {% endif %}
-          {% else %}
-          <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='interested') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button {% if e['status'] == 'interested' %}disabled{% endif %}>Interested</button>
-          </form>
-          <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='watching') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button {% if e['status'] == 'watching' %}disabled{% endif %}>Watching</button>
-          </form>
-          <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='ignore') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button {% if e['status'] == 'ignored' %}disabled{% endif %}>Ignore</button>
-          </form>
-            {% if g.user['is_admin'] %}
+          </div>
+          {% if g.user['is_admin'] %}
+          <div class="admin-actions">
             <form method="post" action="{{ url_for('mark_inactive_route', event_id=e['id']) }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="inactive_reason" value="manual">
               <button class="btn-inactive">Mark inactive</button>
             </form>
-            {% endif %}
+          </div>
           {% endif %}
-        </td>
-      </tr>
+        {% endif %}
+      </div>
+
       {% set proposals = proposals_by_event.get(e['id']) %}
       {% if proposals and g.user['is_admin'] %}
-      <tr class="proposals-row">
-        <td colspan="7">
-          <div class="proposals">
-            <div class="proposals-title">Detected changes</div>
-            {% for p in proposals %}
-            <div class="proposal">
-              <div class="proposal-field">{{ p['field'] | field_label }}</div>
-              <div class="proposal-diff">{{ p['old_value'] | proposal_value }} &rarr; {{ p['new_value'] | proposal_value }}</div>
-              {% if p['evidence'] %}<div class="proposal-evidence">Evidence: {{ p['evidence'] }}</div>{% endif %}
-              <div class="proposal-detected">Detected {{ p['detected_at'][:10] }}</div>
-              <div class="proposal-actions">
-                <form method="post" action="{{ url_for('accept_proposal_route', proposal_id=p['id']) }}">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                  <button>Accept</button>
-                </form>
-                <form method="post" action="{{ url_for('dismiss_proposal_route', proposal_id=p['id']) }}">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                  <button>Dismiss</button>
-                </form>
-              </div>
-            </div>
-            {% endfor %}
+      <div class="proposals">
+        <div class="proposals-title">Admin: Detected changes</div>
+        {% for p in proposals %}
+        <div class="proposal">
+          <div class="proposal-field">{{ p['field'] | field_label }}</div>
+          <div class="proposal-diff">{{ p['old_value'] | proposal_value }} &rarr; {{ p['new_value'] | proposal_value }}</div>
+          {% if p['evidence'] %}<div class="proposal-evidence">Evidence: {{ p['evidence'] }}</div>{% endif %}
+          <div class="proposal-detected">Detected {{ p['detected_at'][:10] }}</div>
+          <div class="proposal-actions">
+            <form method="post" action="{{ url_for('accept_proposal_route', proposal_id=p['id']) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button>Accept</button>
+            </form>
+            <form method="post" action="{{ url_for('dismiss_proposal_route', proposal_id=p['id']) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button>Dismiss</button>
+            </form>
           </div>
-        </td>
-      </tr>
+        </div>
+        {% endfor %}
+      </div>
       {% endif %}
+
       {% set candidates = recovery_by_event.get(e['id']) %}
       {% if candidates and g.user['is_admin'] %}
-      <tr class="recovery-row">
-        <td colspan="7">
-          <div class="recovery">
-            <div class="recovery-title">Possible replacement source</div>
-            {% for c in candidates %}
-            <div class="recovery-candidate">
-              <div class="recovery-type">{{ c['candidate_type'] | candidate_type_label }} &mdash; {{ c['confidence'] }} confidence</div>
-              <div class="recovery-url"><a href="{{ c['candidate_url'] }}" target="_blank" rel="noopener">{{ c['candidate_url'] }}</a></div>
-              {% if c['evidence'] %}<div class="recovery-evidence">Evidence: {{ c['evidence'] }}</div>{% endif %}
-              <div class="recovery-actions">
-                <form method="post" action="{{ url_for('accept_recovery_candidate_route', candidate_id=c['id']) }}">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                  <button>Use this source</button>
-                </form>
-                <form method="post" action="{{ url_for('dismiss_recovery_candidate_route', candidate_id=c['id']) }}">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                  <button>Dismiss</button>
-                </form>
-              </div>
-            </div>
-            {% endfor %}
+      <div class="recovery">
+        <div class="recovery-title">Admin: Possible replacement source</div>
+        {% for c in candidates %}
+        <div class="recovery-candidate">
+          <div class="recovery-type">{{ c['candidate_type'] | candidate_type_label }} &mdash; {{ c['confidence'] }} confidence</div>
+          <div class="recovery-url"><a href="{{ c['candidate_url'] }}" target="_blank" rel="noopener">{{ c['candidate_url'] }}</a></div>
+          {% if c['evidence'] %}<div class="recovery-evidence">Evidence: {{ c['evidence'] }}</div>{% endif %}
+          <div class="recovery-actions">
+            <form method="post" action="{{ url_for('accept_recovery_candidate_route', candidate_id=c['id']) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button>Use this source</button>
+            </form>
+            <form method="post" action="{{ url_for('dismiss_recovery_candidate_route', candidate_id=c['id']) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button>Dismiss</button>
+            </form>
           </div>
-        </td>
-      </tr>
+        </div>
+        {% endfor %}
+      </div>
       {% endif %}
-      {% endfor %}
-    </tbody>
-  </table>
+    </div>
+    {% endfor %}
+    {% if not events %}<p class="empty-state">No events match the current filters.</p>{% endif %}
+  </div>
 
   {% if reviews and g.user['is_admin'] %}
   <section class="review-queue">
-    <h2>Events to Review</h2>
+    <h2>Admin: Events to Review</h2>
     <p class="review-queue-hint">Discovered by ASU Events but not clearly relevant - accept to add as a normal (New) event, or dismiss to ignore.</p>
     {% for r in reviews %}
     <div class="review-item">

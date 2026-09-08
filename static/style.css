@@ -25,22 +25,164 @@ h1 {
   text-decoration: underline;
 }
 
-table {
-  width: 100%;
-  border-collapse: collapse;
+.summary-tiles {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.summary-tile {
   background: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  border: 1px solid #eee;
+  border-radius: 6px;
+  padding: 0.6rem 1rem;
+  min-width: 6rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }
 
-th, td {
-  text-align: left;
-  padding: 0.6rem 0.8rem;
-  border-bottom: 1px solid #eee;
-  vertical-align: top;
+.summary-count {
+  display: block;
+  font-size: 1.4rem;
+  font-weight: 700;
 }
 
-th {
-  background: #f0f0f0;
+.summary-label {
+  display: block;
+  color: #666;
+  font-size: 0.8rem;
+}
+
+.filter-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+  align-items: center;
+}
+
+.filter-form input[type="search"] {
+  flex: 1 1 16rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.filter-form select {
+  padding: 0.4rem 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.filter-form button {
+  cursor: pointer;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 4px;
+  padding: 0.4rem 0.8rem;
+}
+
+.filter-clear {
+  color: #2563eb;
+  font-size: 0.85rem;
+  text-decoration: none;
+}
+
+.event-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.event-card {
+  background: #fff;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  padding: 0.8rem 1rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+.event-card.status-ignored { opacity: 0.55; }
+.event-card.event-inactive { opacity: 0.6; }
+
+.event-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.event-title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.event-datetime {
+  color: #333;
+  font-size: 0.88rem;
+  margin-top: 0.2rem;
+}
+
+.event-location {
+  color: #444;
+  font-size: 0.85rem;
+  margin-top: 0.1rem;
+}
+
+.event-badges {
+  margin-top: 0.35rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.badge-type { background: #e0f2fe; color: #075985; }
+.badge-loc { background: #f3f4f6; color: #6b7280; }
+.badge-source { background: #f5f3ff; color: #6d28d9; }
+
+.source-link {
+  font-size: 0.8rem;
+  color: #2563eb;
+}
+
+.event-card-actions {
+  margin-top: 0.6rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.user-actions, .admin-actions {
+  display: flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.admin-actions {
+  padding-left: 0.6rem;
+  border-left: 2px solid #f3d1a4;
+}
+
+.user-actions button, .admin-actions button {
+  cursor: pointer;
+  border: 1px solid #ccc;
+  background: #fff;
+  border-radius: 4px;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.user-actions button:disabled {
+  background: #e5e7eb;
+  cursor: default;
+}
+
+.empty-state {
+  color: #666;
+  padding: 2rem 0;
+  text-align: center;
 }
 
 .desc {
@@ -78,30 +220,6 @@ th {
 .reg-open { background: #dcfce7; color: #166534; }
 .reg-closed { background: #fee2e2; color: #991b1b; }
 
-tr.status-ignored {
-  opacity: 0.5;
-}
-
-.actions {
-  display: flex;
-  gap: 0.3rem;
-  flex-wrap: wrap;
-}
-
-.actions button {
-  cursor: pointer;
-  border: 1px solid #ccc;
-  background: #fff;
-  border-radius: 4px;
-  padding: 0.3rem 0.6rem;
-  font-size: 0.85rem;
-}
-
-.actions button:disabled {
-  background: #e5e7eb;
-  cursor: default;
-}
-
 .proposal-error {
   background: #fee2e2;
   color: #991b1b;
@@ -110,10 +228,14 @@ tr.status-ignored {
   margin-bottom: 1rem;
 }
 
-tr.proposals-row td {
-  background: #fffbeb;
-  border-bottom: 1px solid #eee;
+.proposals, .recovery {
+  margin-top: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 4px;
 }
+
+.proposals { background: #fffbeb; }
+.recovery { background: #eff6ff; }
 
 .proposals-title {
   font-weight: 600;
@@ -181,10 +303,6 @@ tr.proposals-row td {
 
 .badge-inactive { background: #f3f4f6; color: #6b7280; margin-left: 0.3rem; }
 
-tr.event-inactive {
-  opacity: 0.6;
-}
-
 .btn-inactive,
 .btn-reactivate {
   cursor: pointer;
@@ -193,11 +311,6 @@ tr.event-inactive {
   border-radius: 4px;
   padding: 0.3rem 0.6rem;
   font-size: 0.85rem;
-}
-
-tr.recovery-row td {
-  background: #eff6ff;
-  border-bottom: 1px solid #eee;
 }
 
 .recovery-title {

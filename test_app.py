@@ -189,6 +189,12 @@ class AppTestCase(unittest.TestCase):
             "SELECT * FROM event_review_candidates WHERE id = ?", (review_id,)
         ).fetchone()
 
+    def _user_event_status_row_count(self, user_id, event_id):
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM user_event_status WHERE user_id = ? AND event_id = ?",
+            (user_id, event_id),
+        ).fetchone()[0]
+
 
 class DashboardRenderingTests(AppTestCase):
     def test_pending_proposal_displayed_under_correct_event(self):
@@ -1152,6 +1158,273 @@ class DashboardIsolationTests(AppTestCase):
         self._post(f"/event/{event_id}/watching")
         count = self.conn.execute("SELECT COUNT(*) FROM events WHERE name = 'Shared Event'").fetchone()[0]
         self.assertEqual(count, 1)
+
+
+class DashboardSummaryCountsTests(AppTestCase):
+    def test_counts_are_per_current_user(self):
+        e1 = _insert_event(self.conn, name="A")
+        e2 = _insert_event(self.conn, name="B")
+        _insert_event(self.conn, name="C")  # stays New for everyone
+        self._post(f"/event/{e1}/interested")
+        self._post(f"/event/{e2}/watching")
+        html = self.client.get("/").data.decode()
+        self.assertIn('data-count-new="1"', html)
+        self.assertIn('data-count-interested="1"', html)
+        self.assertIn('data-count-watching="1"', html)
+        self.assertIn('data-count-ignored="0"', html)
+
+    def test_missing_status_row_counts_as_new(self):
+        _insert_event(self.conn, name="Untouched")
+        html = self.client.get("/").data.decode()
+        self.assertIn('data-count-new="1"', html)
+
+    def test_counts_isolated_between_users(self):
+        friend = _create_friend(self.conn)
+        e1 = _insert_event(self.conn, name="Shared")
+        self._post(f"/event/{e1}/interested")  # owner
+        self._logout()
+        self._login(friend["email"], "friend-test-password")
+        html = self.client.get("/").data.decode()
+        self.assertIn('data-count-new="1"', html)
+        self.assertIn('data-count-interested="0"', html)
+
+
+class DashboardQueryFilterTests(AppTestCase):
+    def test_status_filter_new(self):
+        e1 = _insert_event(self.conn, name="A")
+        e2 = _insert_event(self.conn, name="B")
+        self._set_owner_status(e2, "interested")
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), status="new")
+        self.assertEqual([r["id"] for r in rows], [e1])
+
+    def test_source_filter(self):
+        e1 = _insert_event(self.conn, name="A", source="MLH")
+        _insert_event(self.conn, name="B", source="ASU Events")
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), source="MLH")
+        self.assertEqual([r["id"] for r in rows], [e1])
+
+    def test_event_type_filter(self):
+        e1 = _insert_event(self.conn, name="A", event_type="hackathon")
+        _insert_event(self.conn, name="B", event_type="asu")
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), event_type="hackathon")
+        self.assertEqual([r["id"] for r in rows], [e1])
+
+    def test_location_type_filter(self):
+        e1 = _insert_event(self.conn, name="A", location_type="online")
+        _insert_event(self.conn, name="B", location_type="in_person")
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), location_type="online")
+        self.assertEqual([r["id"] for r in rows], [e1])
+
+    def test_search_matches_name_case_insensitive(self):
+        e1 = _insert_event(self.conn, name="Cactus Hack")
+        _insert_event(self.conn, name="Other Thing")
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), q="cactus")
+        self.assertEqual([r["id"] for r in rows], [e1])
+
+    def test_search_matches_description_location_source(self):
+        e1 = _insert_event(self.conn, name="A", description="A talk about ROBOTS")
+        e2 = _insert_event(self.conn, name="B", location="Memorial Union")
+        e3 = _insert_event(self.conn, name="C", source="MLH")
+        _insert_event(self.conn, name="D")
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), q="robots")
+        self.assertEqual([r["id"] for r in rows], [e1])
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), q="memorial")
+        self.assertEqual([r["id"] for r in rows], [e2])
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), q="mlh")
+        self.assertEqual([r["id"] for r in rows], [e3])
+
+    def test_search_scoped_to_permitted_events_combined_with_filter(self):
+        e1 = _insert_event(self.conn, name="Cactus Hack", source="MLH")
+        _insert_event(self.conn, name="Cactus Fair", source="ASU Events")
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), q="cactus", source="MLH")
+        self.assertEqual([r["id"] for r in rows], [e1])
+
+    def test_sort_upcoming_default_orders_by_start_date(self):
+        e_later = _insert_event(self.conn, name="Later", start_date="2026-12-01")
+        e_sooner = _insert_event(self.conn, name="Sooner", start_date="2026-10-01")
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), sort="upcoming")
+        self.assertEqual([r["id"] for r in rows], [e_sooner, e_later])
+
+    def test_sort_recent_orders_by_first_seen_desc(self):
+        e_old = _insert_event(self.conn, name="Old")
+        self.conn.execute(
+            "UPDATE events SET first_seen = '2026-01-01T00:00:00+00:00' WHERE id = ?", (e_old,)
+        )
+        e_new = _insert_event(self.conn, name="New")
+        self.conn.execute(
+            "UPDATE events SET first_seen = '2026-09-01T00:00:00+00:00' WHERE id = ?", (e_new,)
+        )
+        self.conn.commit()
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), sort="recent")
+        self.assertEqual([r["id"] for r in rows], [e_new, e_old])
+
+
+class StatusRedirectPreservesFiltersTests(AppTestCase):
+    def test_redirect_preserves_query_params(self):
+        event_id = _insert_event(self.conn, name="A")
+        resp = self.client.post(
+            f"/event/{event_id}/interested",
+            data={"csrf_token": self._csrf_token(), "status": "new", "source": "MLH", "q": "cactus"},
+        )
+        self.assertEqual(resp.status_code, 302)
+        location = resp.headers["Location"]
+        self.assertTrue(location.startswith("/"))
+        self.assertIn("status=new", location)
+        self.assertIn("source=MLH", location)
+        self.assertIn("q=cactus", location)
+
+    def test_redirect_ignores_unknown_form_fields(self):
+        event_id = _insert_event(self.conn, name="A")
+        resp = self.client.post(
+            f"/event/{event_id}/interested",
+            data={"csrf_token": self._csrf_token(), "evil": "//attacker.example"},
+        )
+        location = resp.headers["Location"]
+        self.assertTrue(location.startswith("/"))
+        self.assertNotIn("attacker.example", location)
+
+    def test_no_filters_redirects_to_plain_index(self):
+        event_id = _insert_event(self.conn, name="A")
+        resp = self._post(f"/event/{event_id}/interested")
+        self.assertEqual(resp.headers["Location"], "/")
+
+    def test_new_action_reverts_status(self):
+        event_id = _insert_event(self.conn)
+        self._post(f"/event/{event_id}/interested")
+        self._post(f"/event/{event_id}/new")
+        # V0.11.1: New is a missing row, never an explicit status='new' row.
+        self.assertIsNone(get_user_event_status(self.conn, self.owner["id"], event_id))
+
+    def test_new_action_scoped_to_current_user_only(self):
+        friend = _create_friend(self.conn)
+        event_id = _insert_event(self.conn)
+        self._set_owner_status(event_id, "interested")
+        self._logout()
+        self._login(friend["email"], "friend-test-password")
+        self._post(f"/event/{event_id}/new")
+        self.assertEqual(get_user_event_status(self.conn, self.owner["id"], event_id), "interested")
+        self.assertIsNone(get_user_event_status(self.conn, friend["id"], event_id))
+
+
+class RevertToNewDeletesRowTests(AppTestCase):
+    """V0.11.1: New is represented ONLY by a missing user_event_status row -
+    the "new" action must DELETE the row, never upsert status='new'."""
+
+    def test_interested_to_new_removes_row(self):
+        event_id = _insert_event(self.conn)
+        self._post(f"/event/{event_id}/interested")
+        self.assertEqual(self._user_event_status_row_count(self.owner["id"], event_id), 1)
+        self._post(f"/event/{event_id}/new")
+        self.assertEqual(self._user_event_status_row_count(self.owner["id"], event_id), 0)
+        self.assertIsNone(get_user_event_status(self.conn, self.owner["id"], event_id))
+
+    def test_watching_to_new_removes_row(self):
+        event_id = _insert_event(self.conn)
+        self._post(f"/event/{event_id}/watching")
+        self._post(f"/event/{event_id}/new")
+        self.assertEqual(self._user_event_status_row_count(self.owner["id"], event_id), 0)
+
+    def test_ignored_to_new_removes_row(self):
+        event_id = _insert_event(self.conn)
+        self._post(f"/event/{event_id}/ignore")
+        self._post(f"/event/{event_id}/new")
+        self.assertEqual(self._user_event_status_row_count(self.owner["id"], event_id), 0)
+
+    def test_new_cannot_remove_another_users_row(self):
+        friend = _create_friend(self.conn)
+        event_id = _insert_event(self.conn)
+        self._set_owner_status(event_id, "watching")
+        self._logout()
+        self._login(friend["email"], "friend-test-password")
+        self._post(f"/event/{event_id}/new")  # friend has no row - should be a no-op
+        self.assertEqual(self._user_event_status_row_count(self.owner["id"], event_id), 1)
+        self.assertEqual(get_user_event_status(self.conn, self.owner["id"], event_id), "watching")
+        self.assertEqual(self._user_event_status_row_count(friend["id"], event_id), 0)
+
+    def test_new_only_deletes_current_users_own_row_not_others(self):
+        friend = _create_friend(self.conn)
+        event_id = _insert_event(self.conn)
+        self._post(f"/event/{event_id}/interested")  # owner
+        self._logout()
+        self._login(friend["email"], "friend-test-password")
+        self._post(f"/event/{event_id}/watching")  # friend
+        self._post(f"/event/{event_id}/new")  # friend reverts their own row
+        self.assertEqual(self._user_event_status_row_count(friend["id"], event_id), 0)
+        self.assertEqual(self._user_event_status_row_count(self.owner["id"], event_id), 1)
+        self.assertEqual(get_user_event_status(self.conn, self.owner["id"], event_id), "interested")
+
+    def test_after_deletion_displays_and_counts_as_new_via_missing_row(self):
+        event_id = _insert_event(self.conn, name="Revertible Event")
+        self._post(f"/event/{event_id}/interested")
+        self._post(f"/event/{event_id}/new")
+        html = self.client.get("/").data.decode()
+        self.assertIn("badge-new", html)
+        self.assertIn('data-count-new="1"', html)
+        self.assertIn('data-count-interested="0"', html)
+
+    def test_after_deletion_appears_under_new_status_filter(self):
+        event_id = _insert_event(self.conn, name="Revertible Event")
+        self._post(f"/event/{event_id}/interested")
+        self._post(f"/event/{event_id}/new")
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), status="new")
+        self.assertIn(event_id, [r["id"] for r in rows])
+
+    def test_new_action_redirect_preserves_filters(self):
+        event_id = _insert_event(self.conn)
+        self._post(f"/event/{event_id}/interested")
+        resp = self.client.post(
+            f"/event/{event_id}/new",
+            data={"csrf_token": self._csrf_token(), "status": "new", "source": "MLH", "q": "cactus", "sort": "recent"},
+        )
+        self.assertEqual(resp.status_code, 302)
+        location = resp.headers["Location"]
+        self.assertTrue(location.startswith("/"))
+        self.assertIn("status=new", location)
+        self.assertIn("source=MLH", location)
+        self.assertIn("q=cactus", location)
+        self.assertIn("sort=recent", location)
+
+    def test_new_action_calendar_behavior_unaffected(self):
+        """Reverting an event's status to New (row deletion) behaves exactly
+        like it already never having been Interested - excluded from the
+        private ICS feed, same as before this change."""
+        event_id = _insert_event(self.conn, name="Career Fair", event_state="active")
+        self._post(f"/event/{event_id}/interested")
+        self.assertIn("SUMMARY:Career Fair", self._owner_ics())
+        self._post(f"/event/{event_id}/new")
+        self.assertNotIn("SUMMARY:Career Fair", self._owner_ics())
+
+
+class DashboardNewSurfaceAuthorizationTests(AppTestCase):
+    def setUp(self):
+        super().setUp()
+        self.friend = _create_friend(self.conn)
+
+    def _login_as_friend(self):
+        self._logout()
+        self._login(self.friend["email"], "friend-test-password")
+
+    def test_regular_user_sees_filter_controls_no_admin_actions(self):
+        _insert_event(self.conn, name="A", event_state="active")
+        self._login_as_friend()
+        html = self.client.get("/").data.decode()
+        self.assertIn("Search title, description, location, source", html)
+        self.assertNotIn("Mark inactive", html)
+        self.assertNotIn(">Accept<", html)
+
+    def test_regular_user_filter_get_params_do_not_expose_admin_panels(self):
+        event_id = _insert_event(self.conn, name="A")
+        _insert_proposal(self.conn, event_id, "registration_status", "unknown", "open")
+        self._login_as_friend()
+        html = self.client.get("/?status=all").data.decode()
+        self.assertNotIn("Detected changes", html)
+
+    def test_search_query_param_does_not_bypass_status_filter_isolation(self):
+        friend_event = _insert_event(self.conn, name="Friend Only Search Term")
+        self._login_as_friend()
+        self._post(f"/event/{friend_event}/interested")
+        html = self.client.get("/?q=friend+only").data.decode()
+        self.assertIn("badge-interested", html)
 
 
 class SecretKeyStartupTests(unittest.TestCase):
