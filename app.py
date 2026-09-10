@@ -104,6 +104,15 @@ CANDIDATE_TYPE_LABELS = {
     "other": "other",
 }
 
+# V0.11.1: display labels for the event-card type badge. Same
+# dict-driven-lookup-with-fallback pattern as CANDIDATE_TYPE_LABELS above -
+# an unlisted event_type just falls back to a generic Title Case rendering
+# (event_type_label below), so this never needs a source-specific code
+# path for a new event_type value to display reasonably.
+EVENT_TYPE_LABELS = {
+    "asu": "ASU",
+}
+
 init_db()
 
 
@@ -133,6 +142,13 @@ def candidate_type_label(candidate_type):
 @app.template_filter("subtype_label")
 def subtype_label(subtype):
     return (subtype or "").replace("_", " ").title()
+
+
+@app.template_filter("event_type_label")
+def event_type_label(event_type):
+    if not event_type:
+        return event_type
+    return EVENT_TYPE_LABELS.get(event_type, event_type.replace("_", " ").title())
 
 
 @app.template_filter("review_signals_list")
@@ -288,6 +304,25 @@ def _dashboard_args_from(mapping):
         if value:
             result[key] = value
     return result
+
+
+def _dashboard_status_url(filters, status):
+    """V0.11.1 UI polish: builds a same-origin dashboard URL that preserves
+    every current filter (q/source/type/location_type/sort) except status,
+    which is replaced - or removed entirely for the "All" tile (status
+    falsy). Powers the clickable summary tiles. Like
+    _dashboard_args_from, this only ever resolves via url_for('index',
+    ...), so it can never become an open redirect regardless of what's in
+    `filters`."""
+    merged = dict(filters)
+    if status:
+        merged["status"] = status
+    else:
+        merged.pop("status", None)
+    return url_for("index", **merged)
+
+
+app.jinja_env.globals["dashboard_status_url"] = _dashboard_status_url
 
 
 def _load_pending_proposals(conn):

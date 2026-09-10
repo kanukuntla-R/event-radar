@@ -21,22 +21,16 @@
   {% if error %}<div class="proposal-error">{{ error }}</div>{% endif %}
 
   <div class="summary-tiles">
-    <div class="summary-tile">
-      <span class="summary-count" data-count-new="{{ summary.new }}">{{ summary.new }}</span>
-      <span class="summary-label">New</span>
-    </div>
-    <div class="summary-tile">
-      <span class="summary-count" data-count-interested="{{ summary.interested }}">{{ summary.interested }}</span>
-      <span class="summary-label">Interested</span>
-    </div>
-    <div class="summary-tile">
-      <span class="summary-count" data-count-watching="{{ summary.watching }}">{{ summary.watching }}</span>
-      <span class="summary-label">Watching</span>
-    </div>
-    <div class="summary-tile">
-      <span class="summary-count" data-count-ignored="{{ summary.ignored }}">{{ summary.ignored }}</span>
-      <span class="summary-label">Ignored</span>
-    </div>
+    <a class="summary-tile{% if not filters.status or filters.status == 'all' %} active{% endif %}" href="{{ dashboard_status_url(filters, none) }}">
+      <span class="summary-count">{{ summary.new + summary.interested + summary.watching + summary.ignored }}</span>
+      <span class="summary-label">All</span>
+    </a>
+    {% for key, label in (('new', 'New'), ('interested', 'Interested'), ('watching', 'Watching'), ('ignored', 'Ignored')) %}
+    <a class="summary-tile summary-tile-{{ key }}{% if filters.status == key %} active{% endif %}" href="{{ dashboard_status_url(filters, key) }}">
+      <span class="summary-count" data-count-{{ key }}="{{ summary[key] }}">{{ summary[key] }}</span>
+      <span class="summary-label">{{ label }}</span>
+    </a>
+    {% endfor %}
   </div>
 
   <form method="get" action="{{ url_for('index') }}" class="filter-form">
@@ -85,12 +79,9 @@
       </div>
       {% endif %}
       <div class="event-badges">
-        {% if e['event_type'] %}<span class="badge badge-type">{{ e['event_type'] }}</span>{% endif %}
-        {% if e['event_type'] == 'asu' %}<span class="badge badge-asu">ASU</span>{% endif %}
-        {% if e['event_subtype'] %}<span class="badge badge-subtype">{{ e['event_subtype'] | subtype_label }}</span>{% endif %}
-        {% if e['source'] %}<span class="badge badge-source">{{ e['source'] }}</span>{% endif %}
-        {% if e['source_url'] %}<a class="source-link" href="{{ e['source_url'] }}" target="_blank" rel="noopener">source</a>{% endif %}
-        <span class="badge reg-{{ e['registration_status'] or 'unknown' }}">{{ (e['registration_status'] or 'unknown').replace('_', ' ') }}</span>
+        {% if e['event_type'] or e['event_subtype'] %}<span class="badge badge-type{% if e['event_type'] == 'asu' %} badge-asu{% endif %}">{{ (e['event_subtype'] | subtype_label) if e['event_subtype'] else (e['event_type'] | event_type_label) }}</span>{% endif %}
+        {% if e['source'] %}{% if e['source_url'] %}<a class="badge badge-source" href="{{ e['source_url'] }}" target="_blank" rel="noopener">{{ e['source'] }}</a>{% else %}<span class="badge badge-source">{{ e['source'] }}</span>{% endif %}{% endif %}
+        {% if e['registration_status'] and e['registration_status'] != 'unknown' %}<span class="badge reg-{{ e['registration_status'] }}">{{ e['registration_status'].replace('_', ' ') }}</span>{% endif %}
         {% if health.level == 'inactive' %}<span class="badge badge-inactive">inactive{% if e['inactive_reason'] %} ({{ e['inactive_reason'] }}){% endif %}</span>{% endif %}
       </div>
       {% if e['organizer'] or e['travel_required'] is not none or (e['event_type'] == 'asu' and e['location_area']) %}
@@ -123,6 +114,7 @@
         {% if health.level == 'inactive' %}
           {% if g.user['is_admin'] %}
           <div class="admin-actions">
+            <span class="admin-tag">Admin</span>
             <form method="post" action="{{ url_for('reactivate_route', event_id=e['id']) }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button class="btn-reactivate">Reactivate</button>
@@ -134,28 +126,29 @@
             <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='interested') }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               {% for k, v in filters.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
-              <button {% if e['status'] == 'interested' %}disabled{% endif %}>Interested</button>
+              <button class="action-btn action-interested" {% if e['status'] == 'interested' %}disabled{% endif %}>Interested</button>
             </form>
             <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='watching') }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               {% for k, v in filters.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
-              <button {% if e['status'] == 'watching' %}disabled{% endif %}>Watching</button>
+              <button class="action-btn action-watching" {% if e['status'] == 'watching' %}disabled{% endif %}>Watching</button>
             </form>
             <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='ignore') }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               {% for k, v in filters.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
-              <button {% if e['status'] == 'ignored' %}disabled{% endif %}>Ignore</button>
+              <button class="action-btn action-ignore" {% if e['status'] == 'ignored' %}disabled{% endif %}>Ignore</button>
             </form>
             {% if e['status'] != 'new' %}
             <form method="post" action="{{ url_for('set_status', event_id=e['id'], action='new') }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               {% for k, v in filters.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
-              <button>New</button>
+              <button class="action-btn action-new">New</button>
             </form>
             {% endif %}
           </div>
           {% if g.user['is_admin'] %}
           <div class="admin-actions">
+            <span class="admin-tag">Admin</span>
             <form method="post" action="{{ url_for('mark_inactive_route', event_id=e['id']) }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="inactive_reason" value="manual">

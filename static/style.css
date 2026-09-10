@@ -1,3 +1,7 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
 body {
   font-family: system-ui, sans-serif;
   margin: 2rem;
@@ -38,6 +42,19 @@ h1 {
   padding: 0.6rem 1rem;
   min-width: 6rem;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.1s ease, box-shadow 0.1s ease;
+}
+
+.summary-tile:hover {
+  border-color: #bbb;
+}
+
+.summary-tile.active {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 1px #2563eb inset;
 }
 
 .summary-count {
@@ -55,7 +72,7 @@ h1 {
 .filter-form {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.6rem;
   margin-bottom: 1.25rem;
   align-items: center;
 }
@@ -68,6 +85,7 @@ h1 {
 }
 
 .filter-form select {
+  flex: 1 1 8rem;
   padding: 0.4rem 0.5rem;
   border: 1px solid #ccc;
   border-radius: 4px;
@@ -138,11 +156,13 @@ h1 {
 
 .badge-type { background: #e0f2fe; color: #075985; }
 .badge-loc { background: #f3f4f6; color: #6b7280; }
-.badge-source { background: #f5f3ff; color: #6d28d9; }
 
-.source-link {
-  font-size: 0.8rem;
-  color: #2563eb;
+a.badge-source, span.badge-source { background: #f5f3ff; color: #6d28d9; }
+a.badge-source {
+  text-decoration: none;
+}
+a.badge-source:hover {
+  text-decoration: underline;
 }
 
 .event-card-actions {
@@ -158,6 +178,7 @@ h1 {
   display: flex;
   gap: 0.3rem;
   flex-wrap: wrap;
+  align-items: center;
 }
 
 .admin-actions {
@@ -165,18 +186,49 @@ h1 {
   border-left: 2px solid #f3d1a4;
 }
 
-.user-actions button, .admin-actions button {
+.admin-tag {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+  color: #b45309;
+  margin-right: 0.1rem;
+}
+
+.action-btn {
   cursor: pointer;
   border: 1px solid #ccc;
   background: #fff;
   border-radius: 4px;
-  padding: 0.3rem 0.6rem;
+  padding: 0.35rem 0.7rem;
   font-size: 0.85rem;
+  font-weight: 500;
+  color: #333;
 }
 
-.user-actions button:disabled {
-  background: #e5e7eb;
+.action-btn:disabled {
   cursor: default;
+}
+
+.action-interested:disabled { background: #dcfce7; color: #166534; border-color: #86efac; }
+.action-watching:disabled { background: #fef9c3; color: #854d0e; border-color: #fde68a; }
+.action-ignore:disabled { background: #f3f4f6; color: #6b7280; border-color: #d1d5db; }
+
+.action-new {
+  background: transparent;
+  border-style: dashed;
+  color: #666;
+  font-weight: 400;
+}
+
+.admin-actions button {
+  cursor: pointer;
+  border: 1px solid #f3d1a4;
+  background: #fffaf0;
+  color: #92400e;
+  border-radius: 4px;
+  padding: 0.28rem 0.55rem;
+  font-size: 0.78rem;
 }
 
 .empty-state {
@@ -189,6 +241,10 @@ h1 {
   color: #666;
   font-size: 0.85rem;
   margin-top: 0.2rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .meta {
@@ -302,16 +358,6 @@ h1 {
 }
 
 .badge-inactive { background: #f3f4f6; color: #6b7280; margin-left: 0.3rem; }
-
-.btn-inactive,
-.btn-reactivate {
-  cursor: pointer;
-  border: 1px solid #ccc;
-  background: #fff;
-  border-radius: 4px;
-  padding: 0.3rem 0.6rem;
-  font-size: 0.85rem;
-}
 
 .recovery-title {
   font-weight: 600;
@@ -439,4 +485,55 @@ h1 {
   border-radius: 4px;
   padding: 0.3rem 0.7rem;
   font-size: 0.85rem;
+}
+
+/* V0.11.1: narrow-viewport layout - cards, filters and summary tiles stay
+   usable (no horizontal overflow) down to phone widths. */
+@media (max-width: 640px) {
+  body {
+    margin: 1rem;
+  }
+
+  header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .summary-tiles {
+    flex-wrap: wrap;
+  }
+
+  .summary-tile {
+    flex: 1 1 40%;
+  }
+
+  .filter-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filter-form input[type="search"],
+  .filter-form select,
+  .filter-form button {
+    width: 100%;
+  }
+
+  .event-card-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.2rem;
+  }
+
+  .event-card-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-actions {
+    border-left: none;
+    border-top: 1px solid #f3d1a4;
+    padding-left: 0;
+    padding-top: 0.4rem;
+  }
 }

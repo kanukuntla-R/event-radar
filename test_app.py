@@ -1259,6 +1259,49 @@ class DashboardQueryFilterTests(AppTestCase):
         self.assertEqual([r["id"] for r in rows], [e_new, e_old])
 
 
+class SummaryTileFilterLinksTests(AppTestCase):
+    """V0.11.1 UI polish: summary tiles are clickable links that apply the
+    corresponding status GET filter, preserving other current filters."""
+
+    def test_tile_hrefs_apply_status_filter_with_no_other_filters(self):
+        html = self.client.get("/").data.decode()
+        self.assertIn('href="/?status=new"', html)
+        self.assertIn('href="/?status=interested"', html)
+        self.assertIn('href="/?status=watching"', html)
+        self.assertIn('href="/?status=ignored"', html)
+
+    def test_all_tile_href_has_no_status_param(self):
+        html = self.client.get("/?status=interested").data.decode()
+        self.assertIn('href="/"', html)
+
+    def test_tile_hrefs_preserve_other_filters(self):
+        html = self.client.get("/?q=cactus&source=MLH").data.decode()
+        # The New tile's href must carry status=new AND still carry the
+        # existing q/source filters - never drop them.
+        self.assertIn("status=new", html)
+        self.assertIn("q=cactus", html)
+        self.assertIn("source=MLH", html)
+
+    def test_active_tile_matches_current_status_filter(self):
+        html = self.client.get("/?status=interested").data.decode()
+        self.assertIn("summary-tile summary-tile-interested active", html)
+        self.assertNotIn("summary-tile summary-tile-new active", html)
+        self.assertNotIn("summary-tile summary-tile-watching active", html)
+        self.assertNotIn("summary-tile summary-tile-ignored active", html)
+
+    def test_all_tile_active_when_no_status_filter(self):
+        html = self.client.get("/").data.decode()
+        self.assertIn('class="summary-tile active"', html)
+
+    def test_clicking_new_tile_link_filters_dashboard(self):
+        e_new = _insert_event(self.conn, name="Untouched Event")
+        e_interested = _insert_event(self.conn, name="Claimed Event")
+        self._post(f"/event/{e_interested}/interested")
+        html = self.client.get("/?status=new").data.decode()
+        self.assertIn("Untouched Event", html)
+        self.assertNotIn("Claimed Event", html)
+
+
 class StatusRedirectPreservesFiltersTests(AppTestCase):
     def test_redirect_preserves_query_params(self):
         event_id = _insert_event(self.conn, name="A")
