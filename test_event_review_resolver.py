@@ -136,6 +136,33 @@ class AcceptTests(unittest.TestCase):
         row = _event(self.conn, outcome["event_id"])
         self.assertEqual(row["source"], "ASU Events")
 
+    def test_accept_preserves_asu_event_type(self):
+        # V0.12A regression companion to test_accept_preserves_non_asu_
+        # event_type below: the fix must not just start propagating SOME
+        # value - it must propagate the ROW's actual stored event_type,
+        # which for every existing ASU review candidate is (and must stay)
+        # 'asu'.
+        rid = _insert_review(self.conn, event_type="asu")
+        outcome = accept_review_candidate(self.conn, rid, resolved_at=RESOLVED_AT)
+        row = _event(self.conn, outcome["event_id"])
+        self.assertEqual(row["event_type"], "asu")
+
+    def test_accept_preserves_non_asu_event_type(self):
+        # V0.12A regression: _candidate_from_review_row used to omit
+        # event_type entirely, so every accepted review candidate silently
+        # reverted to event_discovery_store.DEFAULTS['event_type'] ('asu')
+        # regardless of what was actually stored on the review row -
+        # invisible while every review-path source was ASU itself.
+        rid = _insert_review(
+            self.conn, name="AZ Tech Council Mixer", event_type="professional",
+            event_subtype=None, source="Arizona Technology Council",
+            source_url="https://www.aztechcouncil.org/event/mixer",
+            organizer="Arizona Technology Council",
+        )
+        outcome = accept_review_candidate(self.conn, rid, resolved_at=RESOLVED_AT)
+        row = _event(self.conn, outcome["event_id"])
+        self.assertEqual(row["event_type"], "professional")
+
     def test_accept_does_not_make_interested(self):
         rid = _insert_review(self.conn)
         outcome = accept_review_candidate(self.conn, rid, resolved_at=RESOLVED_AT)

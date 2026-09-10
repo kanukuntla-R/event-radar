@@ -35,6 +35,13 @@ def _candidate_from_review_row(row):
         "location": row["location"],
         "location_type": row["location_type"],
         "location_area": row["location_area"],
+        # V0.12A: was missing entirely - every review candidate silently
+        # reverted to event_discovery_store.DEFAULTS['event_type'] ('asu')
+        # on accept, regardless of what event_type was actually stored on
+        # the review row. Invisible while every review-path source was ASU
+        # (same value either way); a real bug for any other source's
+        # candidates (e.g. Arizona Technology Council's 'professional').
+        "event_type": row["event_type"],
         "event_subtype": row["event_subtype"],
         "source": row["source"],
         "source_url": row["source_url"],
