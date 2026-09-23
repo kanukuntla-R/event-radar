@@ -1189,6 +1189,65 @@ class DashboardSummaryCountsTests(AppTestCase):
         self.assertIn('data-count-interested="0"', html)
 
 
+class SummaryCountsPastEventVisibilityTests(AppTestCase):
+    """V0.12C: summary tile counts follow the same past-event visibility
+    rule as the event list itself (via _visible_events/is_event_past) -
+    but never the search/source/type/location/sort filters, which is
+    exactly what DashboardQueryFilterTests already exercises for the event
+    list and deliberately does NOT apply here. Uses year-2000/2099 dates,
+    same as PastEventDashboardFilterTests, so nothing depends on the
+    actual wall clock."""
+
+    def test_past_events_do_not_contribute_to_default_counts(self):
+        _insert_event(self.conn, name="Ancient", start_date="2000-01-01", end_date="2000-01-02")
+        html = self.client.get("/").data.decode()
+        self.assertIn('data-count-new="0"', html)
+
+    def test_future_and_current_events_contribute_to_default_counts(self):
+        _insert_event(self.conn, name="Future", start_date="2099-01-01", end_date="2099-01-02")
+        html = self.client.get("/").data.decode()
+        self.assertIn('data-count-new="1"', html)
+
+    def test_include_past_restores_historical_events_to_counts(self):
+        e1 = _insert_event(self.conn, name="Ancient", start_date="2000-01-01", end_date="2000-01-02")
+        self._post(f"/event/{e1}/interested")
+        html = self.client.get("/?past=1").data.decode()
+        self.assertIn('data-count-interested="1"', html)
+        html = self.client.get("/").data.decode()
+        self.assertIn('data-count-interested="0"', html)
+
+    def test_counts_mix_past_and_present_correctly(self):
+        _insert_event(self.conn, name="Ancient", start_date="2000-01-01", end_date="2000-01-02")
+        _insert_event(self.conn, name="Future", start_date="2099-01-01", end_date="2099-01-02")
+        html = self.client.get("/").data.decode()
+        self.assertIn('data-count-new="1"', html)
+        html = self.client.get("/?past=1").data.decode()
+        self.assertIn('data-count-new="2"', html)
+
+    def test_summary_counts_ignore_search_and_source_filters(self):
+        # Past-visibility is the only filter these counts follow - q/source
+        # (and every other search/narrowing filter) must not change them,
+        # same as before this change.
+        e1 = _insert_event(self.conn, name="Alpha", source="MLH")
+        _insert_event(self.conn, name="Beta", source="ASU Events")
+        self._post(f"/event/{e1}/interested")
+        html = self.client.get("/?q=alpha&source=MLH").data.decode()
+        self.assertIn('data-count-new="1"', html)
+        self.assertIn('data-count-interested="1"', html)
+
+    def test_per_user_isolation_preserved_with_past_visibility(self):
+        friend = _create_friend(self.conn)
+        e1 = _insert_event(self.conn, name="Ancient Shared", start_date="2000-01-01", end_date="2000-01-02")
+        self._set_owner_status(e1, "interested")
+        self._logout()
+        self._login(friend["email"], "friend-test-password")
+        html = self.client.get("/?past=1").data.decode()
+        # The friend never claimed this event - even with past events
+        # included, it must still read as New for them, not Interested.
+        self.assertIn('data-count-new="1"', html)
+        self.assertIn('data-count-interested="0"', html)
+
+
 class DashboardQueryFilterTests(AppTestCase):
     def test_status_filter_new(self):
         e1 = _insert_event(self.conn, name="A")
@@ -1327,9 +1386,12 @@ class StatusRedirectPreservesFiltersTests(AppTestCase):
         self.assertNotIn("attacker.example", location)
 
     def test_no_filters_redirects_to_plain_index(self):
+        # V0.12B: every status-change redirect now carries a
+        # #event-<event_id> fragment (scroll-position preservation) - "no
+        # filters" only means the query-string portion is empty.
         event_id = _insert_event(self.conn, name="A")
         resp = self._post(f"/event/{event_id}/interested")
-        self.assertEqual(resp.headers["Location"], "/")
+        self.assertEqual(resp.headers["Location"], f"/#event-{event_id}")
 
     def test_new_action_reverts_status(self):
         event_id = _insert_event(self.conn)
@@ -1504,6 +1566,316 @@ class SecretKeyStartupTests(unittest.TestCase):
     def test_import_succeeds_with_secret_key_set(self):
         result = self._import_app_in_subprocess(secret_key="a-throwaway-subprocess-test-secret")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class PastEventDashboardFilterTests(AppTestCase):
+    """V0.12B Issue 1: the dashboard hides past events by default, without
+    deleting them from the DB, and reveals them again with
+    ?past=1/checking "Include past events". Uses dates far enough in the
+    past (2000) / future (2099) that these tests never depend on the
+    actual wall clock - the precise timezone/boundary semantics (currently
+    running, multi-day, all-day, TBA, ...) are covered with deterministic
+    frozen `now` values in test_calendar_service_visibility.py instead."""
+
+    def test_past_event_hidden_by_default(self):
+        _insert_event(self.conn, name="Ancient Hackathon", start_date="2000-01-01", end_date="2000-01-02")
+        html = self.client.get("/").data.decode()
+        self.assertNotIn("Ancient Hackathon", html)
+
+    def test_future_event_visible_by_default(self):
+        _insert_event(self.conn, name="Future Hackathon", start_date="2099-01-01", end_date="2099-01-02")
+        html = self.client.get("/").data.decode()
+        self.assertIn("Future Hackathon", html)
+
+    def test_past_event_not_deleted_from_db(self):
+        event_id = _insert_event(self.conn, name="Ancient Hackathon", start_date="2000-01-01", end_date="2000-01-02")
+        self.client.get("/")
+        self.assertIsNotNone(self._event(event_id))
+
+    def test_include_past_checkbox_reveals_historical_events(self):
+        _insert_event(self.conn, name="Ancient Hackathon", start_date="2000-01-01", end_date="2000-01-02")
+        html = self.client.get("/?past=1").data.decode()
+        self.assertIn("Ancient Hackathon", html)
+
+    def test_include_past_survives_other_filters(self):
+        _insert_event(self.conn, name="Ancient Robotics Talk", source="MLH", start_date="2000-01-01", end_date="2000-01-02")
+        _insert_event(self.conn, name="Ancient Unrelated Thing", source="Other", start_date="2000-01-01", end_date="2000-01-02")
+        html = self.client.get("/?past=1&source=MLH&q=robotics").data.decode()
+        self.assertIn("Ancient Robotics Talk", html)
+        self.assertNotIn("Ancient Unrelated Thing", html)
+
+    def test_past_checkbox_state_reflected_in_form(self):
+        html = self.client.get("/?past=1").data.decode()
+        self.assertIn('name="past" value="1" checked', html)
+        html = self.client.get("/").data.decode()
+        self.assertNotIn('name="past" value="1" checked', html)
+
+    def test_uncertain_tba_event_not_hidden_as_past(self):
+        _insert_event(self.conn, name="TBA Event", date_status="tba", start_date=None, end_date=None)
+        html = self.client.get("/").data.decode()
+        self.assertIn("TBA Event", html)
+
+    def test_per_user_isolation_unaffected_by_past_filter(self):
+        friend = _create_friend(self.conn)
+        event_id = _insert_event(self.conn, name="Ancient Hackathon", start_date="2000-01-01", end_date="2000-01-02")
+        self._set_owner_status(event_id, "interested")
+        self._logout()
+        self._login(friend["email"], "friend-test-password")
+        html = self.client.get("/?past=1&status=interested").data.decode()
+        # The friend never claimed this event - it must not show up under
+        # their own "interested" filter even with past events included.
+        self.assertNotIn("Ancient Hackathon", html)
+        html = self.client.get("/?past=1").data.decode()
+        self.assertIn("Ancient Hackathon", html)
+
+
+class EventCardAnchorAndRedirectFragmentTests(AppTestCase):
+    """V0.12B Issue 2: stable per-event anchors + status-change redirects
+    that scroll back to the same card instead of resetting to the top."""
+
+    def test_event_card_has_stable_id(self):
+        event_id = _insert_event(self.conn, name="A")
+        html = self.client.get("/").data.decode()
+        self.assertIn(f'id="event-{event_id}"', html)
+
+    def test_status_redirect_contains_event_fragment(self):
+        event_id = _insert_event(self.conn, name="A")
+        resp = self._post(f"/event/{event_id}/interested")
+        self.assertTrue(resp.headers["Location"].endswith(f"#event-{event_id}"))
+
+    def test_status_redirect_fragment_combines_with_preserved_filters(self):
+        event_id = _insert_event(self.conn, name="A")
+        resp = self.client.post(
+            f"/event/{event_id}/watching",
+            data={"csrf_token": self._csrf_token(), "source": "MLH", "q": "cactus"},
+        )
+        location = resp.headers["Location"]
+        self.assertIn("source=MLH", location)
+        self.assertIn("q=cactus", location)
+        self.assertTrue(location.endswith(f"#event-{event_id}"))
+        # The fragment must come after the query string, exactly once.
+        self.assertEqual(location.count("#"), 1)
+
+    def test_client_cannot_inject_a_different_fragment(self):
+        # Neither an unrecognized form field nor a "#" smuggled inside a
+        # whitelisted filter value can change what fragment is produced -
+        # it is always exactly one real "#event-<event_id>" delimiter,
+        # derived only from the route's own path parameter. A "#" inside a
+        # filter VALUE (e.g. q=cactus#evil) is safely percent-encoded by
+        # url_for into the query string (%23) - it must never become a
+        # second, real fragment delimiter.
+        event_id = _insert_event(self.conn, name="A")
+        resp = self.client.post(
+            f"/event/{event_id}/interested",
+            data={
+                "csrf_token": self._csrf_token(),
+                "q": "cactus#evil-fragment",
+                "fragment": "evil-fragment",
+                "redirect_fragment": "evil-fragment",
+            },
+        )
+        location = resp.headers["Location"]
+        self.assertEqual(location.count("#"), 1)
+        self.assertTrue(location.endswith(f"#event-{event_id}"))
+        # The smuggled text may appear percent-encoded and inert inside the
+        # query string, but never as (or inside) the real fragment.
+        real_fragment = location.split("#", 1)[1]
+        self.assertEqual(real_fragment, f"event-{event_id}")
+        query_part = location.split("#", 1)[0]
+        self.assertIn("%23evil-fragment", query_part)
+
+    def test_redirect_remains_same_origin_relative_url(self):
+        event_id = _insert_event(self.conn, name="A")
+        resp = self._post(f"/event/{event_id}/interested")
+        location = resp.headers["Location"]
+        self.assertTrue(location.startswith("/"))
+        self.assertNotIn("://", location)
+
+    def test_graceful_degradation_when_event_leaves_filtered_view(self):
+        # Filtering to status=new, then marking the event Interested, makes
+        # it drop out of that same filtered view. The redirect must still
+        # succeed (302, correct filters preserved, correct fragment) - the
+        # filter itself must not be weakened just to keep the card visible.
+        event_id = _insert_event(self.conn, name="A")
+        resp = self.client.post(
+            f"/event/{event_id}/interested",
+            data={"csrf_token": self._csrf_token(), "status": "new"},
+        )
+        self.assertEqual(resp.status_code, 302)
+        location = resp.headers["Location"]
+        self.assertIn("status=new", location)
+        self.assertTrue(location.endswith(f"#event-{event_id}"))
+        # Confirm the event genuinely is no longer in that filtered view.
+        html = self.client.get(location.split("#")[0]).data.decode()
+        self.assertEqual(self._owner_status(event_id), "interested")
+        # "A" is a very generic name; check status/id-scoped absence via
+        # the per-status count instead of a substring match.
+        rows = app_module._load_dashboard_events(self.conn, self._owner_id(), status="new")
+        self.assertNotIn(event_id, [r["id"] for r in rows])
+        del html  # rendered only to prove the redirect target itself still loads fine
+
+    def test_action_semantics_unchanged_by_fragment_addition(self):
+        # New/Interested/Watching/Ignored still write exactly the same
+        # per-user status as before - the fragment is purely cosmetic.
+        event_id = _insert_event(self.conn)
+        self._post(f"/event/{event_id}/interested")
+        self.assertEqual(self._owner_status(event_id), "interested")
+        self._post(f"/event/{event_id}/watching")
+        self.assertEqual(self._owner_status(event_id), "watching")
+        self._post(f"/event/{event_id}/ignore")
+        self.assertEqual(self._owner_status(event_id), "ignored")
+        self._post(f"/event/{event_id}/new")
+        self.assertIsNone(get_user_event_status(self.conn, self.owner["id"], event_id))
+
+
+class AdminActionRedirectPreservationTests(AppTestCase):
+    """V0.12C: mark_inactive/reactivate/proposal/source-recovery/review
+    accept-dismiss all now redirect through the same shared
+    _dashboard_redirect helper the status actions use - preserving the
+    whitelisted filters and anchoring to #event-<event_id> wherever the
+    action is associated with one concrete, already-existing event."""
+
+    def test_mark_inactive_preserves_filters_and_anchors_to_event(self):
+        event_id = _insert_event(self.conn, name="A", event_state="active")
+        resp = self.client.post(
+            f"/event/{event_id}/inactive",
+            data={"csrf_token": self._csrf_token(), "source": "MLH", "q": "cactus"},
+        )
+        location = resp.headers["Location"]
+        self.assertIn("source=MLH", location)
+        self.assertIn("q=cactus", location)
+        self.assertTrue(location.endswith(f"#event-{event_id}"))
+
+    def test_reactivate_preserves_filters_and_anchors_to_event(self):
+        event_id = _insert_event(self.conn, name="A", event_state="inactive", inactive_reason="manual")
+        resp = self.client.post(
+            f"/event/{event_id}/reactivate",
+            data={"csrf_token": self._csrf_token(), "status": "all"},
+        )
+        location = resp.headers["Location"]
+        self.assertIn("status=all", location)
+        self.assertTrue(location.endswith(f"#event-{event_id}"))
+
+    def test_accept_proposal_anchors_to_the_proposals_event(self):
+        event_id = _insert_event(self.conn, name="A", registration_status="unknown")
+        pid = _insert_proposal(self.conn, event_id, "registration_status", "unknown", "open")
+        resp = self.client.post(
+            f"/proposal/{pid}/accept",
+            data={"csrf_token": self._csrf_token(), "source": "MLH"},
+        )
+        location = resp.headers["Location"]
+        self.assertIn("source=MLH", location)
+        self.assertTrue(location.endswith(f"#event-{event_id}"))
+
+    def test_dismiss_proposal_anchors_to_the_proposals_event(self):
+        event_id = _insert_event(self.conn, name="A")
+        pid = _insert_proposal(self.conn, event_id, "registration_status", "unknown", "open")
+        resp = self._post(f"/proposal/{pid}/dismiss")
+        self.assertTrue(resp.headers["Location"].endswith(f"#event-{event_id}"))
+
+    def test_accept_recovery_candidate_anchors_to_the_candidates_event(self):
+        event_id = _insert_event(self.conn, name="A", consecutive_failures=3)
+        cid = _insert_recovery_candidate(self.conn, event_id)
+        resp = self.client.post(
+            f"/source-recovery/{cid}/accept",
+            data={"csrf_token": self._csrf_token(), "type": "hackathon"},
+        )
+        location = resp.headers["Location"]
+        self.assertIn("type=hackathon", location)
+        self.assertTrue(location.endswith(f"#event-{event_id}"))
+
+    def test_dismiss_recovery_candidate_anchors_to_the_candidates_event(self):
+        event_id = _insert_event(self.conn, name="A", consecutive_failures=3)
+        cid = _insert_recovery_candidate(self.conn, event_id)
+        resp = self._post(f"/source-recovery/{cid}/dismiss")
+        self.assertTrue(resp.headers["Location"].endswith(f"#event-{event_id}"))
+
+    def test_accept_review_anchors_to_the_newly_created_event(self):
+        review_id = _insert_review_candidate(self.conn, name="Brand New Talk")
+        resp = self.client.post(
+            f"/review/{review_id}/accept",
+            data={"csrf_token": self._csrf_token(), "source": "ASU Events"},
+        )
+        location = resp.headers["Location"]
+        self.assertIn("source=ASU+Events", location)
+        # The new event's id is not known ahead of time - confirm the
+        # fragment matches whatever row was actually inserted.
+        new_event = self.conn.execute(
+            "SELECT id FROM events WHERE name = 'Brand New Talk'"
+        ).fetchone()
+        self.assertIsNotNone(new_event)
+        self.assertTrue(location.endswith(f"#event-{new_event['id']}"))
+
+    def test_accept_review_duplicate_anchors_to_existing_event(self):
+        # Same name/source_url as an existing event -> event_dedup treats
+        # it as a duplicate; no second event is inserted, but the review
+        # candidate should still anchor back to the pre-existing one.
+        existing_id = _insert_event(
+            self.conn, name="Repeat Talk", source="ASU Events",
+            source_url="https://asuevents.asu.edu/event/repeat-talk",
+        )
+        review_id = _insert_review_candidate(
+            self.conn, name="Repeat Talk", source="ASU Events",
+            source_url="https://asuevents.asu.edu/event/repeat-talk",
+        )
+        resp = self._post(f"/review/{review_id}/accept")
+        self.assertTrue(resp.headers["Location"].endswith(f"#event-{existing_id}"))
+
+    def test_dismiss_review_preserves_filters_with_no_invented_anchor(self):
+        # A review candidate has no existing event before acceptance -
+        # dismissing it must never invent a fragment.
+        review_id = _insert_review_candidate(self.conn, name="Maosho")
+        resp = self.client.post(
+            f"/review/{review_id}/dismiss",
+            data={"csrf_token": self._csrf_token(), "q": "maosho"},
+        )
+        location = resp.headers["Location"]
+        self.assertIn("q=maosho", location)
+        self.assertNotIn("#", location)
+
+    def test_no_filters_admin_actions_still_redirect_to_dashboard(self):
+        event_id = _insert_event(self.conn, name="A", event_state="active")
+        resp = self._post(f"/event/{event_id}/inactive")
+        self.assertEqual(resp.headers["Location"], f"/#event-{event_id}")
+
+    def test_csrf_still_enforced_on_admin_actions(self):
+        # A POST missing/mismatching csrf_token must still be rejected,
+        # exactly as before this change - the redirect helper change must
+        # not have loosened CSRF enforcement.
+        event_id = _insert_event(self.conn, name="A", event_state="active")
+        with self.client.session_transaction() as sess:
+            sess["csrf_token"] = "real-token"
+        resp = self.client.post(f"/event/{event_id}/inactive", data={"csrf_token": "wrong-token"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self._event(event_id)["event_state"], "active")
+
+    def test_admin_authorization_still_enforced(self):
+        # A non-admin user must still be refused (403), unchanged by the
+        # redirect-helper refactor.
+        friend = _create_friend(self.conn)
+        event_id = _insert_event(self.conn, name="A", event_state="active")
+        self._logout()
+        self._login(friend["email"], "friend-test-password")
+        resp = self._post(f"/event/{event_id}/inactive")
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self._event(event_id)["event_state"], "active")
+
+    def test_graceful_degradation_when_admin_action_removes_event_from_view(self):
+        # Filtering to a specific status, then accepting a proposal that
+        # doesn't change that status, still succeeds and preserves the
+        # filter+fragment even though nothing about visibility changed here -
+        # the key property is the redirect never has to weaken the filter
+        # to keep working.
+        event_id = _insert_event(self.conn, name="A", registration_status="unknown")
+        pid = _insert_proposal(self.conn, event_id, "registration_status", "unknown", "open")
+        resp = self.client.post(
+            f"/proposal/{pid}/accept",
+            data={"csrf_token": self._csrf_token(), "status": "new"},
+        )
+        self.assertEqual(resp.status_code, 302)
+        location = resp.headers["Location"]
+        self.assertIn("status=new", location)
+        self.assertTrue(location.endswith(f"#event-{event_id}"))
 
 
 if __name__ == "__main__":

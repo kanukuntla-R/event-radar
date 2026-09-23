@@ -5,7 +5,7 @@ from datetime import datetime
 from flask import Flask, render_template, redirect, url_for, Response, abort, request, session, g, make_response
 
 from db import get_db, init_db
-from calendar_service import generate_ics
+from calendar_service import generate_ics, is_event_past
 from proposal_resolver import accept_proposal, dismiss_proposal, StaleProposalError
 from source_health import classify_source_health
 from source_recovery_resolver import accept_recovery_candidate, dismiss_recovery_candidate
@@ -202,7 +202,7 @@ def format_review_date(row):
     return _format_date_time_label(row["start_date"], row["start_time"], row["end_date"], row["end_time"])
 
 
-DASHBOARD_FILTER_KEYS = ("q", "status", "source", "type", "location_type", "sort")
+DASHBOARD_FILTER_KEYS = ("q", "status", "source", "type", "location_type", "sort", "past")
 
 _SORT_OPTIONS = {
     "upcoming": "e.event_state = 'inactive', effective_status = 'ignored', "
@@ -258,20 +258,48 @@ def _load_dashboard_events(conn, user_id, q=None, status=None, source=None,
     ).fetchall()
 
 
-def _dashboard_summary_counts(conn, user_id):
+def _visible_events(rows, include_past, now=None):
+    """Applies the dashboard's default hide-past-events filter to already-
+    fetched rows. A pure, easily-testable post-filter layer over
+    _load_dashboard_events's result - the SQL query itself stays entirely
+    date-oblivious, so every existing direct caller of
+    _load_dashboard_events (see test_app.py's DashboardQueryFilterTests) is
+    completely unaffected by this filter.
+
+    include_past=True (the dashboard's "Include past events" checkbox)
+    returns every row unchanged - past events are never deleted from the
+    DB, only hidden from the default view. Uses
+    calendar_service.is_event_past's single, timezone-aware definition of
+    "is this event over" (shared with the ICS feed's DTEND) rather than a
+    second copy of that logic here."""
+    if include_past:
+        return rows
+    return [r for r in rows if not is_event_past(r, now=now)]
+
+
+def _dashboard_summary_counts(conn, user_id, include_past=False):
     """Per-user New/Interested/Watching/Ignored counts over the same
-    unfiltered per-user event set _load_dashboard_events(...) returns
-    with no filters - stays stable as the user narrows the view below."""
+    per-user event set _load_dashboard_events(...) returns with no
+    search/source/type/location/sort filters - stays stable as the user
+    narrows the view with those. The ONE filter these counts DO follow is
+    past-event visibility (include_past), via the same _visible_events/
+    is_event_past definition of "is this event over" the event list itself
+    uses - never a second date/time implementation here. Missing-row-means-
+    New and per-user isolation are unchanged: the LEFT JOIN/COALESCE shape
+    is identical to before, just no longer aggregated in SQL (GROUP BY
+    can't apply a timezone-aware past/future filter), so counting happens
+    in Python after _visible_events narrows the rows."""
     rows = conn.execute(
-        "SELECT COALESCE(ues.status, 'new') AS status, COUNT(*) AS n "
+        "SELECT e.start_date, e.start_time, e.end_date, e.end_time, e.timezone, "
+        "COALESCE(ues.status, 'new') AS status "
         "FROM events e "
-        "LEFT JOIN user_event_status ues ON ues.event_id = e.id AND ues.user_id = ? "
-        "GROUP BY COALESCE(ues.status, 'new')",
+        "LEFT JOIN user_event_status ues ON ues.event_id = e.id AND ues.user_id = ?",
         (user_id,),
     ).fetchall()
+    rows = _visible_events(rows, include_past=include_past)
     counts = {"new": 0, "interested": 0, "watching": 0, "ignored": 0}
     for row in rows:
-        counts[row["status"]] = row["n"]
+        counts[row["status"]] += 1
     return counts
 
 
@@ -304,6 +332,36 @@ def _dashboard_args_from(mapping):
         if value:
             result[key] = value
     return result
+
+
+def _dashboard_redirect(filter_source, event_id=None):
+    """V0.12C: single shared redirect used by every dashboard action route
+    (status changes, admin inactive/reactivate, proposal/recovery/review
+    accept-dismiss) - same-origin, same whitelisted filters, same
+    event-anchor behavior everywhere, instead of each route repeating its
+    own url_for(...) call.
+
+    `filter_source` is the request mapping to pull DASHBOARD_FILTER_KEYS
+    from (request.form for every one of these POST routes) - passed
+    through _dashboard_args_from's whitelist, exactly like every other
+    dashboard filter, so this can never become an open redirect regardless
+    of what a client sends.
+
+    `event_id` must be a trusted integer the CALLER already resolved - a
+    route's own <int:...> path parameter, or an id read back from a DB row
+    server-side - never anything taken directly from request data. When
+    given, the redirect carries a #event-<event_id> fragment so the
+    browser scrolls back to that card; if the action makes the event/card
+    disappear from the current filtered view, the browser simply finds no
+    matching element and does nothing further - graceful degradation,
+    never a reason to weaken the filters. Pass event_id=None (the default)
+    for actions with no single associated event - e.g. dismissing a review
+    candidate never touches an events row - and the redirect carries
+    filters only, with no invented anchor."""
+    target = url_for("index", **_dashboard_args_from(filter_source))
+    if event_id is not None:
+        target = f"{target}#event-{event_id}"
+    return redirect(target)
 
 
 def _dashboard_status_url(filters, status):
@@ -361,7 +419,9 @@ def _render_dashboard(error=None):
         source=filters.get("source"), event_type=filters.get("type"),
         location_type=filters.get("location_type"), sort=filters.get("sort", "upcoming"),
     )
-    summary = _dashboard_summary_counts(conn, g.user["id"])
+    include_past = bool(filters.get("past"))
+    events = _visible_events(events, include_past=include_past)
+    summary = _dashboard_summary_counts(conn, g.user["id"], include_past=include_past)
     choices = _dashboard_filter_choices(conn)
     proposals_by_event = _load_pending_proposals(conn)
     recovery_by_event = _load_pending_recovery_candidates(conn)
@@ -425,7 +485,18 @@ def set_status(event_id, action):
     BOTH g.user["id"] and event_id - never an upsert of status='new'. New
     is represented only by a missing row (see delete_user_event_status);
     every dashboard read already treats a missing row as 'new' via
-    COALESCE(ues.status, 'new'), so this needs no other code to change."""
+    COALESCE(ues.status, 'new'), so this needs no other code to change.
+
+    V0.12B: the redirect also carries a #event-<event_id> fragment so the
+    browser scrolls back to this card instead of resetting to the top of
+    the page. event_id here is the route's own <int:event_id> path
+    parameter - never anything read from the request body/query string -
+    so the fragment is entirely application-generated and cannot be
+    supplied or altered by the client. If the status change makes the
+    event drop out of the current filtered view (e.g. filtering to
+    status=new after marking it Interested), the browser simply finds no
+    matching element and does nothing - no error, graceful degradation,
+    and the filters themselves stay exactly as strict as before."""
     if action not in ACTION_TO_STATUS and action not in REVERT_TO_NEW_ACTIONS:
         abort(404)
     conn = get_db()
@@ -437,7 +508,7 @@ def set_status(event_id, action):
         except ValueError:
             pass
     conn.close()
-    return redirect(url_for("index", **_dashboard_args_from(request.form)))
+    return _dashboard_redirect(request.form, event_id=event_id)
 
 
 @app.route("/event/<int:event_id>/inactive", methods=["POST"])
@@ -454,7 +525,8 @@ def mark_inactive_route(event_id):
     )
     conn.commit()
     conn.close()
-    return redirect(url_for("index"))
+    # V0.12C: event_id is this route's own trusted path parameter.
+    return _dashboard_redirect(request.form, event_id=event_id)
 
 
 @app.route("/event/<int:event_id>/reactivate", methods=["POST"])
@@ -468,13 +540,25 @@ def reactivate_route(event_id):
     )
     conn.commit()
     conn.close()
-    return redirect(url_for("index"))
+    return _dashboard_redirect(request.form, event_id=event_id)
+
+
+def _proposal_event_id(conn, proposal_id):
+    """Trusted lookup of the event a proposal is about (server-side, from
+    the DB row's own event_id column - never from request data) so the
+    accept/dismiss routes below can anchor their redirect to that event's
+    card. Returns None if the proposal row is gone (shouldn't normally
+    happen here, but a redirect helper that degrades to "no anchor" is
+    safer than one that assumes the row still exists)."""
+    row = conn.execute("SELECT event_id FROM event_change_proposals WHERE id = ?", (proposal_id,)).fetchone()
+    return row["event_id"] if row else None
 
 
 @app.route("/proposal/<int:proposal_id>/accept", methods=["POST"])
 @admin_required
 def accept_proposal_route(proposal_id):
     conn = get_db()
+    event_id = _proposal_event_id(conn, proposal_id)
     try:
         accept_proposal(conn, proposal_id)
     except StaleProposalError as e:
@@ -484,46 +568,56 @@ def accept_proposal_route(proposal_id):
         conn.close()
         return _render_dashboard(error=f"Could not accept proposal {proposal_id}: {e}")
     conn.close()
-    return redirect(url_for("index"))
+    return _dashboard_redirect(request.form, event_id=event_id)
 
 
 @app.route("/proposal/<int:proposal_id>/dismiss", methods=["POST"])
 @admin_required
 def dismiss_proposal_route(proposal_id):
     conn = get_db()
+    event_id = _proposal_event_id(conn, proposal_id)
     try:
         dismiss_proposal(conn, proposal_id)
     except (LookupError, ValueError) as e:
         conn.close()
         return _render_dashboard(error=f"Could not dismiss proposal {proposal_id}: {e}")
     conn.close()
-    return redirect(url_for("index"))
+    return _dashboard_redirect(request.form, event_id=event_id)
+
+
+def _recovery_candidate_event_id(conn, candidate_id):
+    """Same trusted-lookup pattern as _proposal_event_id, for
+    source_recovery_candidates."""
+    row = conn.execute("SELECT event_id FROM source_recovery_candidates WHERE id = ?", (candidate_id,)).fetchone()
+    return row["event_id"] if row else None
 
 
 @app.route("/source-recovery/<int:candidate_id>/accept", methods=["POST"])
 @admin_required
 def accept_recovery_candidate_route(candidate_id):
     conn = get_db()
+    event_id = _recovery_candidate_event_id(conn, candidate_id)
     try:
         accept_recovery_candidate(conn, candidate_id)
     except (LookupError, ValueError) as e:
         conn.close()
         return _render_dashboard(error=f"Could not use candidate source {candidate_id}: {e}")
     conn.close()
-    return redirect(url_for("index"))
+    return _dashboard_redirect(request.form, event_id=event_id)
 
 
 @app.route("/source-recovery/<int:candidate_id>/dismiss", methods=["POST"])
 @admin_required
 def dismiss_recovery_candidate_route(candidate_id):
     conn = get_db()
+    event_id = _recovery_candidate_event_id(conn, candidate_id)
     try:
         dismiss_recovery_candidate(conn, candidate_id)
     except (LookupError, ValueError) as e:
         conn.close()
         return _render_dashboard(error=f"Could not dismiss candidate source {candidate_id}: {e}")
     conn.close()
-    return redirect(url_for("index"))
+    return _dashboard_redirect(request.form, event_id=event_id)
 
 
 @app.route("/review/<int:review_id>/accept", methods=["POST"])
@@ -531,12 +625,17 @@ def dismiss_recovery_candidate_route(candidate_id):
 def accept_review_route(review_id):
     conn = get_db()
     try:
-        accept_review_candidate(conn, review_id)
+        result = accept_review_candidate(conn, review_id)
     except (LookupError, ValueError) as e:
         conn.close()
         return _render_dashboard(error=f"Could not add review candidate {review_id}: {e}")
     conn.close()
-    return redirect(url_for("index"))
+    # Anchor to the newly inserted event, or (if this candidate turned out
+    # to duplicate one) the existing event it matched. A review candidate
+    # has no event_id of its own before acceptance - accept_review_candidate's
+    # own return value is the only trusted source for this.
+    event_id = result["event_id"] or result["existing_event_id"]
+    return _dashboard_redirect(request.form, event_id=event_id)
 
 
 @app.route("/review/<int:review_id>/dismiss", methods=["POST"])
@@ -549,7 +648,9 @@ def dismiss_review_route(review_id):
         conn.close()
         return _render_dashboard(error=f"Could not dismiss review candidate {review_id}: {e}")
     conn.close()
-    return redirect(url_for("index"))
+    # Dismissing a review candidate never touches an events row - there is
+    # no meaningful event to anchor to, so this preserves filters only.
+    return _dashboard_redirect(request.form, event_id=None)
 
 
 def _external_base_url():

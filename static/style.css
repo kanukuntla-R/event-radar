@@ -99,6 +99,15 @@ h1 {
   padding: 0.4rem 0.8rem;
 }
 
+.filter-past-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: #444;
+  white-space: nowrap;
+}
+
 .filter-clear {
   color: #2563eb;
   font-size: 0.85rem;
