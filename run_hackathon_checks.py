@@ -1,14 +1,21 @@
 """CLI: run one batch pass of hackathon source checks against the real DB
 and real collector. Prints a readable per-event report and summary.
 
+Invoked by event-radar-hackathons.timer/.service (deploy/systemd/) with NO
+arguments, daily at 07:00 - so, unlike run_az_tech_council_discovery.py,
+no-argument invocation deliberately still runs a real persistent pass
+(dry_run=False). --help/-h and unknown arguments never touch the DB or
+network, same safety guarantee as that other CLI - only the no-args default
+differs, to preserve the live timer's existing contract. (Note:
+event-radar-source-recovery.timer runs 30 minutes later and depends on this
+job's consecutive_failures writes already being in place.)
+
 Usage:
-    python run_hackathon_checks.py
+    python run_hackathon_checks.py              # persistent run (dry_run=False)
     python run_hackathon_checks.py --dry-run
 """
+import argparse
 import sys
-
-from db import get_db
-from hackathon_check_runner import run_due_hackathon_checks
 
 
 def _proposals_line(entry):
@@ -53,8 +60,27 @@ def _print_summary(summary):
     print(f"Duplicate proposals skipped: {summary['proposals_skipped_duplicate']}")
 
 
-def main():
-    dry_run = "--dry-run" in sys.argv[1:]
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Run one batch pass of hackathon source checks. With no arguments, "
+                     "runs a real persistent pass (matches the live systemd timer's contract).",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Check due hackathons but write nothing to the database.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    dry_run = args.dry_run
+
+    # Imports deferred until after arg parsing so --help/-h/unknown-arg exits
+    # never touch the DB or network.
+    from db import get_db
+    from hackathon_check_runner import run_due_hackathon_checks
+
     title = "Event Radar — Hackathon Check" + (" (dry run)" if dry_run else "")
     print(title)
     print()
