@@ -6,18 +6,43 @@ manual accept/dismiss from the dashboard, never inserted directly;
 "exclude" is reported only. Never marks anything Interested, never touches
 user_event_status.
 
+Safe by default: --help/-h and no-argument invocation never touch the
+network or the database. Exactly one of --dry-run / --persist must be given
+to actually run discovery; --persist is the only mode that can write.
+
 Usage:
-    python run_az_tech_council_discovery.py
     python run_az_tech_council_discovery.py --dry-run
+    python run_az_tech_council_discovery.py --persist
 """
+import argparse
 import sys
 
-from db import get_db
-from az_tech_council_discovery_runner import run_az_tech_council_discovery
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Run one Arizona Technology Council discovery pass.",
+    )
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--dry-run", action="store_true",
+        help="Fetch and classify candidates but write nothing to the database.",
+    )
+    mode.add_argument(
+        "--persist", action="store_true",
+        help="Run discovery and persist include/review results to the database.",
+    )
+    return parser.parse_args(argv)
 
 
-def main():
-    dry_run = "--dry-run" in sys.argv[1:]
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    dry_run = args.dry_run
+
+    # Imports deferred until after arg parsing so --help/-h/unknown-arg exits
+    # never touch the DB or network.
+    from db import get_db
+    from az_tech_council_discovery_runner import run_az_tech_council_discovery
+
     title = "Event Radar — Arizona Technology Council Discovery" + (" (dry run)" if dry_run else "")
     print(title)
     print()
