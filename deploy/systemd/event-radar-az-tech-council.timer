@@ -1,0 +1,20 @@
+[Unit]
+Description=Event Radar - Arizona Technology Council discovery, every 6 hours
+
+[Timer]
+# Every 6 hours, like the two ASU collectors, but offset to :00 (instead of
+# their :15/:45) AND to 03/09/15/21 (instead of 00/06/12/18) so this timer
+# never lands on the same clock minute as any existing job - including the
+# daily hackathon check (07:00) and source recovery (07:30), which a naive
+# 6-hourly-from-midnight schedule would collide with once a day. See
+# deploy/systemd/README.md for the full schedule table.
+OnCalendar=*-*-* 03:00:00
+OnCalendar=*-*-* 09:00:00
+OnCalendar=*-*-* 15:00:00
+OnCalendar=*-*-* 21:00:00
+Persistent=true
+RandomizedDelaySec=600
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

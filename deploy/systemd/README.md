@@ -25,10 +25,18 @@ the existing code.
   absolute and independent of the process's current working directory.
   `WorkingDirectory=` is still set in every unit as a matter of good
   practice, not because it's required for correctness.
-- None of the four CLI scripts read an environment variable, need an
+- None of the five CLI scripts read an environment variable, need an
   interactive terminal, or import Flask - confirmed by inspection and by
   running each with the exact absolute interpreter/script paths from an
   unrelated working directory (`/tmp`) before writing any unit file.
+- Four of the five (`run_hackathon_checks.py`, `run_asu_career_discovery.py`,
+  `run_asu_events_discovery.py`, `run_source_recovery.py`) persist when
+  invoked with zero arguments - their `ExecStart=` passes none, matching
+  that legacy contract (see each script's own CLI-safety docstring).
+  `run_az_tech_council_discovery.py` is the exception: it has no legacy
+  no-args-persists contract (it was never scheduled before its CLI safety
+  fix added argparse), so its `ExecStart=` passes `--persist` explicitly -
+  the only one of the five unit files that appends an argument.
 
 ## Units
 
@@ -38,18 +46,24 @@ the existing code.
 | `event-radar-asu-career.{service,timer}` | `run_asu_career_discovery.py` | 00:15, 06:15, 12:15, 18:15 |
 | `event-radar-asu-events.{service,timer}` | `run_asu_events_discovery.py` | 00:45, 06:45, 12:45, 18:45 |
 | `event-radar-source-recovery.{service,timer}` | `run_source_recovery.py` | daily 07:30 |
+| `event-radar-az-tech-council.{service,timer}` | `run_az_tech_council_discovery.py --persist` | 03:00, 09:00, 15:00, 21:00 |
 | `event-radar-web.service` | Flask dashboard (via gunicorn) | always running, no timer |
 
-All four timers have `Persistent=true` (a missed run while the machine was
+All five timers have `Persistent=true` (a missed run while the machine was
 off runs once at the next boot/daemon start) and `RandomizedDelaySec=600`
-(a random 0-10 minute jitter so the ASU collectors don't hit the real sites
-at an exact clock boundary every time).
+(a random 0-10 minute jitter so the collectors don't hit the real sites at
+an exact clock boundary every time).
 
 The two ASU collectors are deliberately staggered by 30 minutes (`:15` vs
 `:45`) so they never share a base minute, on top of the shared lock below.
 Source recovery runs 30 minutes after the daily hackathon check, since
 recovery eligibility (`consecutive_failures >= 3`) depends on that day's
-check having already run.
+check having already run. Arizona Technology Council discovery runs every 6
+hours like the two ASU collectors, but offset to `03:00`/`09:00`/`15:00`/
+`21:00` - a different base hour *and* a different minute (`:00` vs their
+`:15`/`:45`) - so it never lands on the same clock minute as either ASU
+collector, and specifically avoids `07:00`/`07:30` so it never coincides
+with the daily hackathon check or source recovery either.
 
 Every service is `Type=oneshot` - it runs once to completion and exits;
 nothing forks or backgrounds itself, and none of them start Flask.
@@ -69,7 +83,7 @@ for a lock file: it must never be a stale leftover from a previous boot,
 and it has no reason to live inside the git-tracked repo or persistent
 `$HOME` state.
 
-**All four services share the same lock file**, so at most one maintenance
+**All five services share the same lock file**, so at most one maintenance
 script ever touches `data/events.db` at a time, regardless of which timer
 fired. This is the actual overlap guard; the schedule staggering above is a
 secondary courtesy to upstream sites, not the safety mechanism.
@@ -201,7 +215,7 @@ journalctl --user -u event-radar-hackathons.service -n 100 --no-pager
 ```
 
 Repeat for `event-radar-asu-career.service`, `event-radar-asu-events.service`,
-`event-radar-source-recovery.service`.
+`event-radar-source-recovery.service`, `event-radar-az-tech-council.service`.
 
 For the web service, after starting it manually once, also check it over
 HTTP before trusting it:
@@ -220,10 +234,11 @@ systemctl --user enable --now event-radar-hackathons.timer
 systemctl --user enable --now event-radar-asu-career.timer
 systemctl --user enable --now event-radar-asu-events.timer
 systemctl --user enable --now event-radar-source-recovery.timer
+systemctl --user enable --now event-radar-az-tech-council.timer
 systemctl --user enable --now event-radar-web.service
 ```
 
-For the four maintenance jobs, only the `.timer` units are enabled - never
+For the five maintenance jobs, only the `.timer` units are enabled - never
 the `.service` units directly (a service isn't `WantedBy=` anything; it's
 meant to be started by its timer or manually, not enabled itself).
 `event-radar-web.service` is the one exception - it's enabled directly
@@ -246,7 +261,7 @@ kanukuntla-r` would be the fix - not done automatically by this phase.
 
 ## Operational commands
 
-Maintenance jobs (substitute any of the four unit names):
+Maintenance jobs (substitute any of the five unit names):
 
 ```
 # List all timers and their next/last run

@@ -1,0 +1,14 @@
+[Unit]
+Description=Event Radar - Arizona Technology Council discovery (run_az_tech_council_discovery.py)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/kanukuntla-r/workspace/event-radar
+# See event-radar-hackathons.service for why this shares one flock with
+# the other maintenance services.
+# Unlike the other four maintenance scripts, run_az_tech_council_discovery.py
+# has no legacy no-args-persists contract - it was never invoked by a live
+# systemd unit before its CLI safety fix (argparse, --dry-run/--persist
+# mutually exclusive and required), so --persist is passed here explicitly
+# and deliberately. Never invoke this CLI with zero arguments.
+ExecStart=/usr/bin/flock -n %t/event-radar-maintenance.lock /home/kanukuntla-r/workspace/event-radar/.venv/bin/python /home/kanukuntla-r/workspace/event-radar/run_az_tech_council_discovery.py --persist
