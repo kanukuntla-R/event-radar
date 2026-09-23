@@ -6,11 +6,11 @@ normalize, apply the deterministic relevance filter, and route by decision:
              queue - never the events table; held for human accept/dismiss)
   exclude -> reported only, never persisted anywhere
 
-See asu_event_relevance.py for the (non-ML) decision policy.
+See event_relevance.py for the (non-ML) decision policy.
 """
 from asu_events_collector import collect_listing
 from asu_events_normalizer import normalize_candidate
-from asu_event_relevance import classify_relevance
+from event_relevance import classify_relevance
 from event_discovery_store import store_discovered_events
 from event_review_store import store_review_candidates
 
@@ -20,7 +20,7 @@ def run_asu_events_discovery(conn, collect_func=None, discovered_at=None, dry_ru
 
     `collect_func` defaults to asu_events_collector.collect_listing (real
     stdlib HTTP); inject a fake for offline tests. Every raw listing hit is
-    normalized, then classified by asu_event_relevance.classify_relevance().
+    normalized, then classified by event_relevance.classify_relevance().
     "include" candidates go to event_discovery_store.store_discovered_events;
     "review" candidates go to event_review_store.store_review_candidates
     (never the events table); "exclude" candidates are reported only.

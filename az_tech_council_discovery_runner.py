@@ -7,20 +7,19 @@ decision:
              queue - never the events table; held for human accept/dismiss)
   exclude -> reported only, never persisted anywhere
 
-Reuses asu_event_relevance.classify_relevance - despite the module name,
-its policy (STRONG_INCLUDE_KEYWORDS/TECHNICAL_INCLUDE_KEYWORDS/
-STRONG_EXCLUDE_KEYWORDS) is pure name/description keyword matching with no
-ASU-specific logic, and already covers exactly the interest categories this
-source cares about (career/professional, software/tech, cybersecurity,
-cloud, AI/data, engineering, startups/innovation). Its category-based
-checks (STRONG_EXCLUDE_CATEGORIES/SUPPORTING_CATEGORIES) reference ASU's
-own taxonomy strings and simply never match AZ Tech Council's different
-category slugs - a harmless no-op, not a source-specific branch added here.
-Mirrors asu_events_discovery_runner.py's shape exactly.
+Reuses event_relevance.classify_relevance - a source-agnostic evidence-
+scoring policy (technology/business-startup/event-format/ambiguous-weak
+phrase categories) with no ASU-specific logic, covering exactly the interest
+categories this source cares about (career/professional, software/tech,
+cybersecurity, cloud, AI/data, engineering, startups/innovation). Its
+category-based checks (STRONG_EXCLUDE_CATEGORIES/SUPPORTING_CATEGORIES)
+reference ASU's own taxonomy strings and simply never match AZ Tech
+Council's different category slugs - a harmless no-op, not a source-specific
+branch added here. Mirrors asu_events_discovery_runner.py's shape exactly.
 """
 from az_tech_council_collector import collect_listing
 from az_tech_council_normalizer import normalize_candidate
-from asu_event_relevance import classify_relevance
+from event_relevance import classify_relevance
 from event_discovery_store import store_discovered_events
 from event_review_store import store_review_candidates
 
@@ -31,7 +30,7 @@ def run_az_tech_council_discovery(conn, collect_func=None, discovered_at=None, d
     `collect_func` defaults to az_tech_council_collector.collect_listing
     (real stdlib HTTP); inject a fake for offline tests. Every raw listing
     hit is normalized, then classified by
-    asu_event_relevance.classify_relevance(). "include" candidates go to
+    event_relevance.classify_relevance(). "include" candidates go to
     event_discovery_store.store_discovered_events; "review" candidates go
     to event_review_store.store_review_candidates (never the events table);
     "exclude" candidates are reported only. dry_run performs the full

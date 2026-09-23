@@ -21,9 +21,16 @@ class IncludeTests(unittest.TestCase):
         result = classify_relevance(_event("Discovery Day with Viasat", description="Meet our recruiters."))
         self.assertEqual(result["decision"], "include")
 
-    def test_networking_includes(self):
+    def test_bare_networking_is_now_review_not_include(self):
+        # INTENTIONAL BEHAVIOR CHANGE (event_relevance.py's scoring model):
+        # bare "networking" is ambiguous ("networking event" vs "computer
+        # networking" are different concepts - see the new relevance spec)
+        # and needs corroborating evidence to include. Was "include" under
+        # the old flat-keyword asu_event_relevance.py model; see
+        # event_relevance.py's module docstring and
+        # test_event_relevance.py's AmbiguousReviewTests for the new policy.
         result = classify_relevance(_event("Thunderbird Networking Lab"))
-        self.assertEqual(result["decision"], "include")
+        self.assertEqual(result["decision"], "review")
 
     def test_strong_technical_event_includes(self):
         result = classify_relevance(_event(
